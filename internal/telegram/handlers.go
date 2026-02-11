@@ -1,0 +1,1220 @@
+package telegram
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"strconv"
+	"strings"
+	"time"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+
+	"habit-tracker-bot/internal/domain"
+	"habit-tracker-bot/internal/repository"
+	"habit-tracker-bot/internal/service"
+)
+
+type UserState struct {
+	State     string
+	HabitName string
+}
+
+type Handlers struct {
+	bot            *tgbotapi.BotAPI
+	repo           repository.Repository
+	habitSvc       *service.HabitService
+	subSvc         *service.SubscriptionService
+	referralSvc    *service.ReferralService
+	achievementSvc *service.AchievementService
+	tinkoffSvc     *service.TinkoffService
+	adSvc          *service.AdService
+	exportSvc      *service.ExportService
+	adminHandlers  *AdminHandlers
+	userStates     map[int64]*UserState
+	botUsername    string
+	subPrice       int64
+}
+
+func NewHandlers(
+	bot *tgbotapi.BotAPI,
+	repo repository.Repository,
+	habitSvc *service.HabitService,
+	subSvc *service.SubscriptionService,
+	referralSvc *service.ReferralService,
+	achievementSvc *service.AchievementService,
+	tinkoffSvc *service.TinkoffService,
+	adSvc *service.AdService,
+	exportSvc *service.ExportService,
+	botUsername string,
+	subPrice int64,
+) *Handlers {
+	h := &Handlers{
+		bot:            bot,
+		repo:           repo,
+		habitSvc:       habitSvc,
+		subSvc:         subSvc,
+		referralSvc:    referralSvc,
+		achievementSvc: achievementSvc,
+		tinkoffSvc:     tinkoffSvc,
+		adSvc:          adSvc,
+		exportSvc:      exportSvc,
+		userStates:     make(map[int64]*UserState),
+		botUsername:    botUsername,
+		subPrice:       subPrice,
+	}
+	return h
+}
+
+func (h *Handlers) SetAdminHandlers(ah *AdminHandlers) {
+	h.adminHandlers = ah
+}
+
+func (h *Handlers) HandleUpdate(update tgbotapi.Update) {
+	ctx := context.Background()
+
+	if update.Message != nil {
+		h.handleMessage(ctx, update.Message)
+	} else if update.CallbackQuery != nil {
+		h.handleCallback(ctx, update.CallbackQuery)
+	}
+}
+
+func (h *Handlers) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
+	// Проверяем админ-команды
+	if h.adminHandlers != nil && h.adminHandlers.HandleAdminCommand(ctx, msg) {
+		return
+	}
+
+	// Проверяем реферальный код
+	var referralCode string
+	if strings.HasPrefix(msg.Text, "/start ref_") {
+		referralCode = strings.TrimPrefix(msg.Text, "/start ref_")
+	}
+
+	// Регистрируем пользователя
+	user := &domain.User{
+		TelegramID:   msg.From.ID,
+		Username:     msg.From.UserName,
+		FirstName:    msg.From.FirstName,
+		Timezone:     "Europe/Moscow",
+		ReferralCode: domain.GenerateReferralCode(),
+	}
+
+	existingUser, err := h.repo.GetUserByTelegramID(ctx, msg.From.ID)
+	isNewUser := errors.Is(err, repository.ErrNotFound)
+
+	if err := h.repo.CreateUser(ctx, user); err != nil {
+		log.Printf("Error creating user: %v", err)
+	}
+
+	// Обрабатываем реферал для нового пользователя
+	if isNewUser && referralCode != "" {
+		user, _ = h.repo.GetUserByTelegramID(ctx, msg.From.ID)
+		if user != nil {
+			result, err := h.referralSvc.ProcessReferralStage1(ctx, referralCode, user)
+			if err != nil {
+				log.Printf("Error processing referral: %v", err)
+			} else if result != nil {
+				h.sendReferralWelcome(ctx, msg.Chat.ID, user, result)
+				h.notifyReferrerStage1(ctx, result, user.FirstName)
+				return
+			}
+		}
+	}
+
+	if existingUser != nil {
+		user = existingUser
+	}
+
+	// Проверяем состояние пользователя
+	if state, ok := h.userStates[msg.From.ID]; ok {
+		h.handleUserState(ctx, msg, state)
+		return
+	}
+	// Обработка команд
+	switch {
+	case msg.Text == "/start" || strings.HasPrefix(msg.Text, "/start "):
+		h.handleStart(ctx, msg)
+	case msg.Text == "📋 Мои привычки" || msg.Text == "/habits":
+		h.handleHabits(ctx, msg)
+	case msg.Text == "➕ Новая привычка" || msg.Text == "/new":
+		h.handleNewHabit(ctx, msg)
+	case msg.Text == "📊 Статистика" || msg.Text == "/stats":
+		h.handleStats(ctx, msg)
+	case msg.Text == "✅ Отметить сегодня" || msg.Text == "/today":
+		h.handleToday(ctx, msg)
+	case msg.Text == "🏆 Достижения" || msg.Text == "/achievements":
+		h.handleAchievements(ctx, msg)
+	case msg.Text == "👥 Рефералы" || msg.Text == "/referral":
+		h.handleReferral(ctx, msg)
+	case msg.Text == "⭐️ Premium" || msg.Text == "/premium":
+		h.handlePremium(ctx, msg)
+	case msg.Text == "❓ Помощь" || msg.Text == "/help":
+		h.handleHelp(ctx, msg)
+	default:
+		h.handleUnknown(ctx, msg)
+	}
+}
+
+func (h *Handlers) sendReferralWelcome(ctx context.Context, chatID int64, user *domain.User, result *service.ReferralResult) {
+	referrer, _ := h.repo.GetUserByID(ctx, result.ReferrerUserID)
+	referrerName := "друга"
+	if referrer != nil && referrer.FirstName != "" {
+		referrerName = referrer.FirstName
+	}
+
+	text := fmt.Sprintf(`🎉 *Добро пожаловать!*
+
+Ты пришёл по приглашению от *%s*!
+
+🎁 *Этап 1 выполнен!*
++%d дня Premium тебе!
+
+💡 *Этап 2:*
+Отмечай привычки %d дней подряд и получи ещё +%d дней Premium!
+
+Начни формировать полезные привычки прямо сейчас!`,
+		referrerName, result.ReferredBonus, domain.ReferralStage2Streak, domain.ReferralStage2Bonus)
+
+	reply := tgbotapi.NewMessage(chatID, text)
+	reply.ParseMode = "Markdown"
+	reply.ReplyMarkup = MainMenuKeyboard()
+	h.bot.Send(reply)
+}
+
+func (h *Handlers) notifyReferrerStage1(ctx context.Context, result *service.ReferralResult, referredName string) {
+	referrer, err := h.repo.GetUserByID(ctx, result.ReferrerUserID)
+	if err != nil {
+		return
+	}
+
+	var text string
+	if result.IsDiscount {
+		text = fmt.Sprintf(`🎉 *Новый реферал!*
+
+По твоей ссылке пришёл *%s*!
+
+🎁 Твоя скидка увеличена на *%d%%*!
+
+💡 Когда %s достигнет %d дней серии — он получит ещё бонус!`,
+			referredName, result.ReferrerBonus, referredName, domain.ReferralStage2Streak)
+	} else {
+		text = fmt.Sprintf(`🎉 *Новый реферал!*
+
+По твоей ссылке пришёл *%s*!
+
+🎁 *Этап 1:* +%d дня Premium!
+
+💡 Когда %s достигнет %d дней серии — вы оба получите ещё +%d дней!`,
+			referredName, result.ReferrerBonus, referredName, domain.ReferralStage2Streak, domain.ReferralStage2Bonus)
+	}
+
+	msg := tgbotapi.NewMessage(referrer.TelegramID, text)
+	msg.ParseMode = "Markdown"
+	h.bot.Send(msg)
+}
+
+func (h *Handlers) handleStart(ctx context.Context, msg *tgbotapi.Message) {
+	text := fmt.Sprintf(`👋 Привет, *%s*!
+
+Я помогу тебе сформировать полезные привычки и отслеживать прогресс.
+
+🎯 *Что я умею:*
+• Создавать и отслеживать привычки
+• Напоминать о выполнении (Premium)
+• Показывать статистику и серии
+
+📌 Нажми "➕ Новая привычка" чтобы начать!
+
+🆓 *Бесплатно:* до 3 привычек
+⭐️ *Premium:* безлимит + напоминания + без рекламы
+
+👥 *Реферальная программа:*
+Отмечай привычки 7 дней подряд и приглашай друзей!`, msg.From.FirstName)
+
+	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
+	reply.ParseMode = "Markdown"
+	reply.ReplyMarkup = MainMenuKeyboard()
+	h.bot.Send(reply)
+}
+
+func (h *Handlers) handleHabits(ctx context.Context, msg *tgbotapi.Message) {
+	user, err := h.repo.GetUserByTelegramID(ctx, msg.From.ID)
+	if err != nil {
+		h.sendError(msg.Chat.ID, "Ошибка получения данных")
+		return
+	}
+
+	habits, _ := h.habitSvc.GetUserHabits(ctx, user.ID)
+	completedToday, _ := h.habitSvc.GetTodayStatus(ctx, user.ID)
+
+	text := "📋 *Мои привычки*\n\n"
+	if len(habits) == 0 {
+		text += "У тебя пока нет привычек. Создай первую!"
+	} else {
+		text += "Выбери привычку для подробностей:"
+	}
+
+	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
+	reply.ParseMode = "Markdown"
+	reply.ReplyMarkup = HabitsListKeyboard(habits, completedToday)
+	h.bot.Send(reply)
+
+	h.maybeShowAd(ctx, msg.Chat.ID, user.ID)
+}
+
+func (h *Handlers) handleNewHabit(ctx context.Context, msg *tgbotapi.Message) {
+	user, err := h.repo.GetUserByTelegramID(ctx, msg.From.ID)
+	if err != nil {
+		h.sendError(msg.Chat.ID, "Ошибка получения данных")
+		return
+	}
+
+	count, _ := h.repo.CountUserHabits(ctx, user.ID)
+	limit := domain.FreeHabitsLimit
+	if user.HasActiveSubscription() {
+		limit = domain.PremiumHabitsLimit
+	}
+
+	if count >= limit {
+		text := fmt.Sprintf(`⚠️ *Достигнут лимит привычек*
+  
+  У тебя уже %d из %d привычек.
+  
+  Оформи Premium или пригласи друзей!`, count, limit)
+
+		reply := tgbotapi.NewMessage(msg.Chat.ID, text)
+		reply.ParseMode = "Markdown"
+		reply.ReplyMarkup = PremiumKeyboard("", user.DiscountPercent)
+		h.bot.Send(reply)
+		return
+	}
+
+	h.userStates[msg.From.ID] = &UserState{State: "awaiting_name"}
+
+	text := "➕ *Новая привычка*\n\nВведи название привычки:"
+	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
+	reply.ParseMode = "Markdown"
+	reply.ReplyMarkup = CancelKeyboard()
+	h.bot.Send(reply)
+}
+
+func (h *Handlers) handleUserState(ctx context.Context, msg *tgbotapi.Message, state *UserState) {
+	if state.State == "awaiting_name" {
+		if len(msg.Text) > 100 {
+			h.sendError(msg.Chat.ID, "Название слишком длинное (макс. 100 символов)")
+			return
+		}
+		state.HabitName = msg.Text
+		state.State = "awaiting_frequency"
+
+		text := fmt.Sprintf("📝 Привычка: *%s*\n\nВыбери периодичность:", state.HabitName)
+		reply := tgbotapi.NewMessage(msg.Chat.ID, text)
+		reply.ParseMode = "Markdown"
+		reply.ReplyMarkup = FrequencyKeyboard()
+		h.bot.Send(reply)
+	}
+}
+
+func (h *Handlers) handleToday(ctx context.Context, msg *tgbotapi.Message) {
+	user, err := h.repo.GetUserByTelegramID(ctx, msg.From.ID)
+	if err != nil {
+		h.sendError(msg.Chat.ID, "Ошибка получения данных")
+		return
+	}
+
+	habits, _ := h.habitSvc.GetUserHabits(ctx, user.ID)
+	if len(habits) == 0 {
+		h.sendMessage(msg.Chat.ID, "У тебя пока нет привычек. Создай первую!")
+		return
+	}
+
+	completedToday, _ := h.habitSvc.GetTodayStatus(ctx, user.ID)
+	completed := 0
+	for _, done := range completedToday {
+		if done {
+			completed++
+		}
+	}
+
+	streak, _ := h.habitSvc.GetUserOverallStreak(ctx, user.ID)
+
+	text := fmt.Sprintf("✅ *Сегодняшний прогресс*\n\nВыполнено: %d из %d\n🔥 Серия: %d дн.", completed, len(habits), streak)
+
+	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
+	reply.ParseMode = "Markdown"
+	reply.ReplyMarkup = TodayChecklistKeyboard(habits, completedToday)
+	h.bot.Send(reply)
+}
+
+func (h *Handlers) handleStats(ctx context.Context, msg *tgbotapi.Message) {
+	user, err := h.repo.GetUserByTelegramID(ctx, msg.From.ID)
+	if err != nil {
+		h.sendError(msg.Chat.ID, "Ошибка получения данных")
+		return
+	}
+
+	stats, _ := h.habitSvc.GetUserStats(ctx, user.ID)
+	if len(stats) == 0 {
+		h.sendMessage(msg.Chat.ID, "📊 *Статистика*\n\nУ тебя пока нет привычек.")
+		return
+	}
+
+	overallStreak, _ := h.habitSvc.GetUserOverallStreak(ctx, user.ID)
+
+	var sb strings.Builder
+	sb.WriteString("📊 *Твоя статистика*\n\n")
+	sb.WriteString(fmt.Sprintf("🔥 *Общая серия:* %d дн.\n\n", overallStreak))
+
+	for _, s := range stats {
+		emoji := "🔥"
+		if s.CurrentStreak == 0 {
+			emoji = "💤"
+		}
+		sb.WriteString(fmt.Sprintf("*%s*\n", s.HabitName))
+		sb.WriteString(fmt.Sprintf("  %s Серия: %d дн. | 🏆 Лучшая: %d дн.\n", emoji, s.CurrentStreak, s.BestStreak))
+		sb.WriteString(fmt.Sprintf("  📈 Выполнено: %.0f%%\n\n", s.CompletionRate))
+	}
+
+	reply := tgbotapi.NewMessage(msg.Chat.ID, sb.String())
+	reply.ParseMode = "Markdown"
+	h.bot.Send(reply)
+
+	h.maybeShowAd(ctx, msg.Chat.ID, user.ID)
+}
+
+func (h *Handlers) handleAchievements(ctx context.Context, msg *tgbotapi.Message) {
+	user, err := h.repo.GetUserByTelegramID(ctx, msg.From.ID)
+	if err != nil {
+		h.sendError(msg.Chat.ID, "Ошибка получения данных")
+		return
+	}
+
+	achievements, _ := h.achievementSvc.GetUserAchievements(ctx, user.ID)
+	streak, _ := h.habitSvc.GetUserOverallStreak(ctx, user.ID)
+	nextAch, daysLeft, _ := h.achievementSvc.GetNextAchievement(ctx, user.ID, streak)
+
+	var sb strings.Builder
+	sb.WriteString("🏆 *Твои достижения*\n\n")
+	if len(achievements) == 0 {
+		sb.WriteString("Пока нет достижений.\n\n")
+	} else {
+		for _, a := range achievements {
+			cfg := domain.GetAchievementConfig(a.Type)
+			if cfg != nil {
+				bonus := ""
+				if cfg.BonusDays > 0 {
+					bonus = fmt.Sprintf(" (+%d дней)", cfg.BonusDays)
+				}
+				sb.WriteString(fmt.Sprintf("%s *%s*%s\n", cfg.Emoji, cfg.Title, bonus))
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString(fmt.Sprintf("🔥 Текущая серия: *%d* дней\n\n", streak))
+
+	if nextAch != nil {
+		bonus := ""
+		if nextAch.BonusDays > 0 {
+			bonus = fmt.Sprintf(" (+%d дней Premium)", nextAch.BonusDays)
+		}
+		sb.WriteString(fmt.Sprintf("📍 *Следующее:* %s %s%s\n", nextAch.Emoji, nextAch.Title, bonus))
+		sb.WriteString(fmt.Sprintf("   Осталось: %d дней\n", daysLeft))
+	} else {
+		sb.WriteString("🎊 *Все достижения получены!*\n")
+	}
+
+	sb.WriteString("\n📊 *Все достижения:*\n")
+	for _, cfg := range domain.AchievementsConfig {
+		has, _ := h.repo.HasAchievement(ctx, user.ID, cfg.Type)
+		status := "⬜️"
+		if has {
+			status = "✅"
+		}
+		bonus := ""
+		if cfg.BonusDays > 0 {
+			bonus = fmt.Sprintf(" +%dд", cfg.BonusDays)
+		}
+		sb.WriteString(fmt.Sprintf("%s %s (%d дней)%s\n", status, cfg.Title, cfg.StreakDays, bonus))
+	}
+
+	reply := tgbotapi.NewMessage(msg.Chat.ID, sb.String())
+	reply.ParseMode = "Markdown"
+	h.bot.Send(reply)
+}
+
+func (h *Handlers) handleReferral(ctx context.Context, msg *tgbotapi.Message) {
+	user, err := h.repo.GetUserByTelegramID(ctx, msg.From.ID)
+	if err != nil {
+		h.sendError(msg.Chat.ID, "Ошибка получения данных")
+		return
+	}
+
+	stats, _ := h.referralSvc.GetReferralStats(ctx, user.ID)
+
+	if !stats.CanInvite {
+		text := fmt.Sprintf(`👥 *Реферальная программа*
+	
+	🔒 *Пока заблокировано*
+	
+	Выполняй все привычки %d дней подряд!
+	
+	📊 *Прогресс:* %d из %d дней
+	
+	🎁 *За первых %d друзей:*
+	• Этап 1: +%d дня (регистрация)
+	• Этап 2: +%d дня (7 дней серии)
+	
+	🎁 *После %d друзей:*
+	• Скидка %d%% за каждого (до %d%%)`,
+			domain.ReferralUnlockStreak, stats.CurrentStreak, domain.ReferralUnlockStreak,
+			domain.ReferralBonusLimit, domain.ReferralStage1Bonus, domain.ReferralStage2Bonus,
+			domain.ReferralBonusLimit, domain.ReferralDiscountPerRef, domain.MaxReferralDiscount)
+
+		reply := tgbotapi.NewMessage(msg.Chat.ID, text)
+		reply.ParseMode = "Markdown"
+		reply.ReplyMarkup = ReferralLockedKeyboard()
+		h.bot.Send(reply)
+		return
+	}
+
+	referralLink, _ := h.referralSvc.GetReferralLink(ctx, user.ID, h.botUsername)
+	remainingBonus := domain.ReferralBonusLimit - stats.BonusReferrals
+
+	var bonusStatus string
+	if remainingBonus > 0 {
+		bonusStatus = fmt.Sprintf("📦 Осталось бонусных слотов: %d", remainingBonus)
+	} else {
+		bonusStatus = fmt.Sprintf("💰 За новых друзей — скидка %d%%", domain.ReferralDiscountPerRef)
+	}
+
+	discountInfo := ""
+	if stats.AccumulatedDiscount > 0 {
+		discountInfo = fmt.Sprintf("\n💳 Накопленная скидка: *%d%%*", stats.AccumulatedDiscount)
+	}
+
+	text := fmt.Sprintf(`👥 *Реферальная программа*
+	
+	🎉 *Разблокировано!*
+	
+	📊 *Статистика:*
+	• Приглашено: %d
+	• С бонусом: %d | Со скидкой: %d
+	• Получено дней: %d%s
+	
+	%s
+	
+	🔗 *Твоя ссылка:*
+	`+"`%s`",
+		stats.TotalReferrals, stats.BonusReferrals, stats.DiscountReferrals,
+		stats.TotalBonusDays, discountInfo, bonusStatus, referralLink)
+
+	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
+	reply.ParseMode = "Markdown"
+	reply.ReplyMarkup = ReferralKeyboard(referralLink)
+	h.bot.Send(reply)
+}
+
+func (h *Handlers) handlePremium(ctx context.Context, msg *tgbotapi.Message) {
+	user, err := h.repo.GetUserByTelegramID(ctx, msg.From.ID)
+	if err != nil {
+		h.sendError(msg.Chat.ID, "Ошибка получения данных")
+		return
+	}
+
+	if user.HasActiveSubscription() {
+		text := fmt.Sprintf(`⭐️ *Premium активен*
+	
+	Подписка до: *%s*
+	
+	✅ Безлимитные привычки
+	✅ Напоминания о привычках
+	✅ Статистика за год
+	✅ Экспорт данных
+	✅ Без рекламы`, user.SubscriptionEnd.Format("02.01.2006"))
+		reply := tgbotapi.NewMessage(msg.Chat.ID, text)
+		reply.ParseMode = "Markdown"
+		reply.ReplyMarkup = PremiumActiveKeyboard()
+		h.bot.Send(reply)
+		return
+	}
+
+	discount := user.DiscountPercent
+	originalPrice := float64(h.subPrice) / 100
+	finalPrice := originalPrice * (1 - float64(discount)/100)
+
+	discountText := ""
+	if discount > 0 {
+		discountText = fmt.Sprintf("\n\n🎁 *Твоя скидка:* %d%%\n💰 Цена для тебя: *%.0f₽* ~~%.0f₽~~", discount, finalPrice, originalPrice)
+	}
+
+	text := fmt.Sprintf(`⭐️ *Premium подписка*
+
+✨ *Что входит:*
+• ♾️ Безлимитные привычки
+• ⏰ Напоминания о привычках
+• 📊 Статистика за год
+• 📥 Экспорт данных
+• 🚫 Без рекламы
+
+💰 *Стоимость:* %.0f₽/месяц%s
+
+💡 *Или бесплатно:* приглашай друзей!`, originalPrice, discountText)
+
+	var paymentURL string
+	if h.tinkoffSvc != nil && h.tinkoffSvc.IsConfigured() {
+		pending, _ := h.repo.GetUserPendingPayment(ctx, user.ID)
+		if pending != nil {
+			paymentURL = pending.PaymentURL
+		}
+	}
+
+	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
+	reply.ParseMode = "Markdown"
+	reply.ReplyMarkup = PremiumKeyboard(paymentURL, discount)
+	h.bot.Send(reply)
+}
+
+func (h *Handlers) handleHelp(ctx context.Context, msg *tgbotapi.Message) {
+	text := `📖 *Справка*
+
+*Команды:*
+/start - Начать
+/habits - Мои привычки
+/new - Создать привычку
+/today - Отметить сегодня
+/stats - Статистика
+/achievements - Достижения
+/referral - Рефералы
+/premium - Подписка
+
+*🆓 Бесплатно:*
+• До 3 привычек
+• Статистика за 7 дней
+
+*⭐️ Premium:*
+• Безлимитные привычки
+• ⏰ Напоминания
+• Статистика за год
+• Экспорт данных
+• Без рекламы
+
+*👥 Реферальная программа:*
+1. Отмечай привычки 7 дней подряд
+2. Приглашай до 5 друзей = до 25 дней
+3. Больше 5 = скидка до 50%`
+
+	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
+	reply.ParseMode = "Markdown"
+	h.bot.Send(reply)
+}
+
+func (h *Handlers) handleUnknown(ctx context.Context, msg *tgbotapi.Message) {
+	reply := tgbotapi.NewMessage(msg.Chat.ID, "Используй кнопки меню или /help")
+	reply.ReplyMarkup = MainMenuKeyboard()
+	h.bot.Send(reply)
+}
+
+// ==================== CALLBACKS ====================
+
+func (h *Handlers) handleCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	h.bot.Send(tgbotapi.NewCallback(callback.ID, ""))
+
+	data := callback.Data
+
+	switch {
+	case data == "cancel":
+		delete(h.userStates, callback.From.ID)
+		h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, "❌ Отменено", nil)
+
+	case strings.HasPrefix(data, "freq_"):
+		h.handleFrequencyCallback(ctx, callback)
+
+	case strings.HasPrefix(data, "complete_"):
+		h.handleCompleteCallback(ctx, callback)
+
+	case strings.HasPrefix(data, "uncomplete_"):
+		h.handleUncompleteCallback(ctx, callback)
+
+	case data == "refresh_today" || data == "go_today":
+		h.refreshToday(ctx, callback)
+
+	case strings.HasPrefix(data, "habit_"):
+		h.handleHabitDetailCallback(ctx, callback)
+
+	case strings.HasPrefix(data, "stats_"):
+		h.handleStatsCallback(ctx, callback)
+
+	case strings.HasPrefix(data, "reminder_"):
+		h.handleReminderCallback(ctx, callback)
+
+	case strings.HasPrefix(data, "setreminder_"):
+		h.handleSetReminderCallback(ctx, callback)
+
+	case strings.HasPrefix(data, "delete_"):
+		h.handleDeleteCallback(ctx, callback)
+
+	case strings.HasPrefix(data, "confirm_delete_"):
+		h.handleConfirmDeleteCallback(ctx, callback)
+
+	case data == "back_to_habits":
+		h.handleBackToHabits(ctx, callback)
+
+	case data == "create_habit":
+		h.handleCreateHabitCallback(ctx, callback)
+
+	case data == "subscribe":
+		h.handleSubscribeCallback(ctx, callback)
+
+	case data == "check_payment":
+		h.handleCheckPaymentCallback(ctx, callback)
+
+	case data == "export_data":
+		h.handleExportDataCallback(ctx, callback)
+
+	case data == "need_premium_reminder":
+		h.handleNeedPremiumReminder(ctx, callback)
+
+	case data == "copy_referral":
+		h.handleCopyReferralCallback(ctx, callback)
+
+	case data == "my_referrals":
+		h.handleMyReferralsCallback(ctx, callback)
+	case strings.HasPrefix(data, "close_ad_"):
+		h.bot.Send(tgbotapi.NewDeleteMessage(callback.Message.Chat.ID, callback.Message.MessageID))
+	}
+}
+
+func (h *Handlers) handleFrequencyCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	state, ok := h.userStates[callback.From.ID]
+	if !ok || state.State != "awaiting_frequency" {
+		return
+	}
+
+	freq := domain.Frequency(strings.TrimPrefix(callback.Data, "freq_"))
+
+	user, err := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
+	if err != nil {
+		h.sendError(callback.Message.Chat.ID, "Ошибка")
+		return
+	}
+
+	habit, err := h.habitSvc.CreateHabit(ctx, user, state.HabitName, "", freq)
+	if err != nil {
+		if errors.Is(err, service.ErrHabitLimitReached) {
+			h.sendError(callback.Message.Chat.ID, "Достигнут лимит привычек")
+		} else {
+			h.sendError(callback.Message.Chat.ID, "Ошибка создания")
+		}
+		delete(h.userStates, callback.From.ID)
+		return
+	}
+
+	delete(h.userStates, callback.From.ID)
+
+	text := fmt.Sprintf("✅ Привычка *%s* создана!", habit.Name)
+	keyboard := BackKeyboard("back_to_habits")
+	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, text, &keyboard)
+}
+
+func (h *Handlers) handleCompleteCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	habitID, _ := strconv.ParseInt(strings.TrimPrefix(callback.Data, "complete_"), 10, 64)
+
+	user, _ := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
+	h.habitSvc.CompleteHabit(ctx, habitID, user.ID)
+
+	streak, _ := h.habitSvc.GetUserOverallStreak(ctx, user.ID)
+
+	// Проверяем достижения
+	achievementResult, _ := h.achievementSvc.CheckAndUnlockAchievements(ctx, user.ID, streak)
+	if achievementResult != nil && achievementResult.IsNew {
+		h.notifyAchievement(callback.From.ID, achievementResult.Achievement)
+	}
+
+	// Проверяем реферальный этап 2
+	referralResult, _ := h.referralSvc.ProcessReferralStage2(ctx, user.ID, streak)
+	if referralResult != nil {
+		h.notifyReferralStage2(ctx, referralResult, user)
+	}
+
+	// Проверяем разблокировку рефералки
+	if streak == domain.ReferralUnlockStreak {
+		h.notifyReferralUnlock(callback.From.ID)
+	}
+
+	h.refreshToday(ctx, callback)
+	h.maybeShowAd(ctx, callback.Message.Chat.ID, user.ID)
+}
+
+func (h *Handlers) handleUncompleteCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	habitID, _ := strconv.ParseInt(strings.TrimPrefix(callback.Data, "uncomplete_"), 10, 64)
+	user, _ := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
+	h.habitSvc.UncompleteHabit(ctx, habitID, user.ID)
+	h.refreshToday(ctx, callback)
+}
+
+func (h *Handlers) refreshToday(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	user, _ := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
+	habits, _ := h.habitSvc.GetUserHabits(ctx, user.ID)
+	completedToday, _ := h.habitSvc.GetTodayStatus(ctx, user.ID)
+
+	completed := 0
+	for _, done := range completedToday {
+		if done {
+			completed++
+		}
+	}
+
+	streak, _ := h.habitSvc.GetUserOverallStreak(ctx, user.ID)
+	text := fmt.Sprintf("✅ *Сегодняшний прогресс*\n\nВыполнено: %d из %d\n🔥 Серия: %d дн.", completed, len(habits), streak)
+
+	keyboard := TodayChecklistKeyboard(habits, completedToday)
+	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, text, &keyboard)
+}
+
+func (h *Handlers) handleHabitDetailCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	habitID, _ := strconv.ParseInt(strings.TrimPrefix(callback.Data, "habit_"), 10, 64)
+	user, _ := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
+	habit, _ := h.habitSvc.GetHabit(ctx, habitID)
+	stats, _ := h.habitSvc.GetHabitStats(ctx, habitID)
+
+	var freq string
+	switch habit.Frequency {
+	case domain.FrequencyDaily:
+		freq = "Ежедневно"
+	case domain.FrequencyWeekly:
+		freq = "Еженедельно"
+	case domain.FrequencyMonthly:
+		freq = "Ежемесячно"
+	}
+
+	reminder := "Не установлено"
+	if habit.ReminderTime != nil {
+		reminder = *habit.ReminderTime
+	}
+	if !user.HasActiveSubscription() {
+		reminder = "🔒 Только в Premium"
+	}
+
+	text := fmt.Sprintf(`📌 *%s*
+
+📅 Периодичность: %s
+⏰ Напоминание: %s
+📊 *Статистика:*
+🔥 Серия: %d дн. | 🏆 Лучшая: %d дн.
+📈 Выполнено: %.0f%%`, habit.Name, freq, reminder, stats.CurrentStreak, stats.BestStreak, stats.CompletionRate)
+
+	keyboard := HabitDetailKeyboard(habitID, user.HasActiveSubscription())
+	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, text, &keyboard)
+}
+
+func (h *Handlers) handleStatsCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	habitID, _ := strconv.ParseInt(strings.TrimPrefix(callback.Data, "stats_"), 10, 64)
+	stats, _ := h.habitSvc.GetHabitStats(ctx, habitID)
+
+	text := fmt.Sprintf(`📊 *%s*
+
+🔥 Текущая серия: *%d* дн.
+🏆 Лучшая серия: *%d* дн.
+📅 Дней отслеживания: %d
+✅ Выполнено: %d
+📈 Процент: *%.0f%%*`,
+		stats.HabitName, stats.CurrentStreak, stats.BestStreak,
+		stats.TotalDays, stats.CompletedDays, stats.CompletionRate)
+
+	keyboard := BackKeyboard(fmt.Sprintf("habit_%d", habitID))
+	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, text, &keyboard)
+}
+
+func (h *Handlers) handleReminderCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	habitID, _ := strconv.ParseInt(strings.TrimPrefix(callback.Data, "reminder_"), 10, 64)
+	keyboard := ReminderTimeKeyboard(habitID)
+	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, "⏰ Выбери время напоминания:", &keyboard)
+}
+
+func (h *Handlers) handleSetReminderCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	parts := strings.Split(strings.TrimPrefix(callback.Data, "setreminder_"), "_")
+	if len(parts) != 2 {
+		return
+	}
+
+	habitID, _ := strconv.ParseInt(parts[0], 10, 64)
+	timeStr := parts[1]
+	user, _ := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
+
+	var reminder *string
+	var text string
+
+	if timeStr == "off" {
+		text = "🔕 Напоминание отключено"
+	} else {
+		reminder = &timeStr
+		text = fmt.Sprintf("⏰ Напоминание: %s", timeStr)
+	}
+
+	h.habitSvc.UpdateHabitReminder(ctx, habitID, user.ID, reminder)
+	keyboard := BackKeyboard(fmt.Sprintf("habit_%d", habitID))
+	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, text, &keyboard)
+}
+
+func (h *Handlers) handleDeleteCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	habitID, _ := strconv.ParseInt(strings.TrimPrefix(callback.Data, "delete_"), 10, 64)
+	habit, _ := h.habitSvc.GetHabit(ctx, habitID)
+
+	text := fmt.Sprintf("🗑 Удалить *%s*?\n\nСтатистика будет потеряна!", habit.Name)
+	keyboard := ConfirmDeleteKeyboard(habitID)
+	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, text, &keyboard)
+}
+
+func (h *Handlers) handleConfirmDeleteCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	habitID, _ := strconv.ParseInt(strings.TrimPrefix(callback.Data, "confirm_delete_"), 10, 64)
+	user, _ := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
+	h.habitSvc.DeleteHabit(ctx, habitID, user.ID)
+
+	keyboard := BackKeyboard("back_to_habits")
+	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, "✅ Привычка удалена", &keyboard)
+}
+
+func (h *Handlers) handleBackToHabits(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	user, _ := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
+	habits, _ := h.habitSvc.GetUserHabits(ctx, user.ID)
+	completedToday, _ := h.habitSvc.GetTodayStatus(ctx, user.ID)
+
+	text := "📋 *Мои привычки*\n\n"
+	if len(habits) == 0 {
+		text += "У тебя пока нет привычек."
+	} else {
+		text += "Выбери привычку:"
+	}
+
+	keyboard := HabitsListKeyboard(habits, completedToday)
+	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, text, &keyboard)
+}
+
+func (h *Handlers) handleCreateHabitCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	h.userStates[callback.From.ID] = &UserState{State: "awaiting_name"}
+	keyboard := CancelKeyboard()
+	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, "➕ Введи название привычки:", &keyboard)
+}
+
+func (h *Handlers) handleSubscribeCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	if h.tinkoffSvc == nil || !h.tinkoffSvc.IsConfigured() {
+		h.sendMessage(callback.Message.Chat.ID, "💡 Оплата временно недоступна. Используй реферальную программу!")
+		return
+	}
+
+	user, _ := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
+	discount := user.DiscountPercent
+	originalAmount := h.subPrice
+	finalAmount := h.subSvc.GetPriceWithDiscount(discount)
+
+	payment, err := h.tinkoffSvc.CreatePayment(ctx, user.ID, finalAmount, originalAmount, discount, "Premium подписка на 1 месяц")
+	if err != nil {
+		log.Printf("Error creating payment: %v", err)
+		h.sendError(callback.Message.Chat.ID, "Ошибка создания платежа")
+		return
+	}
+
+	priceText := fmt.Sprintf("%.0f₽", float64(finalAmount)/100)
+	if discount > 0 {
+		priceText = fmt.Sprintf("%.0f₽ (скидка %d%%)", float64(finalAmount)/100, discount)
+	}
+
+	text := fmt.Sprintf(`💳 *Оплата подписки*
+
+Сумма: *%s*
+
+Нажми кнопку для оплаты.
+После оплаты нажми "Проверить оплату".`, priceText)
+
+	keyboard := PremiumKeyboard(payment.PaymentURL, discount)
+	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, text, &keyboard)
+}
+
+func (h *Handlers) handleCheckPaymentCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	user, err := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
+	if err != nil {
+		h.sendError(callback.Message.Chat.ID, "Пользователь не найден")
+		return
+	}
+
+	// Если уже Premium — показываем статус
+	if user.HasActiveSubscription() {
+		text := fmt.Sprintf(`🎉 *Оплата прошла успешно!*
+
+Premium активен до: *%s*
+
+Теперь тебе доступны:
+✅ Безлимитные привычки
+✅ Напоминания о привычках
+✅ Статистика за год
+✅ Экспорт / импорт данных
+✅ Отсутствие рекламы`, user.SubscriptionEnd.Format("02.01.2006"))
+		h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, text, nil)
+		return
+	}
+
+	// Ищем последний pending платёж
+	payment, err := h.repo.GetUserPendingPayment(ctx, user.ID)
+	if err != nil || payment == nil {
+		h.bot.Send(tgbotapi.NewCallback(callback.ID, "Нет активного платежа"))
+		return
+	}
+
+	// Запрашиваем актуальный статус у Tinkoff
+	tinkoffResp, err := h.tinkoffSvc.GetPaymentStatus(ctx, payment.OrderID)
+	if err != nil {
+		log.Printf("Ошибка GetState для OrderID=%s: %v", payment.OrderID, err)
+		h.bot.Send(tgbotapi.NewCallback(callback.ID, "Не удалось проверить платёж"))
+		return
+	}
+
+	if tinkoffResp.Status == "CONFIRMED" {
+		// Активируем подписку напрямую
+		if err := h.tinkoffSvc.ProcessConfirmedPayment(ctx, payment.OrderID); err != nil {
+			log.Printf("Ошибка активации подписки: %v", err)
+			h.bot.Send(tgbotapi.NewCallback(callback.ID, "Ошибка при активации"))
+			return
+		}
+
+		// Обновляем данные пользователя
+		updatedUser, _ := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
+		text := fmt.Sprintf(`🎉 *Оплата прошла успешно!*
+
+Premium активен до: *%s*
+
+Теперь тебе доступны:
+✅ Безлимитные привычки
+✅ Напоминания о привычках
+✅ Статистика за год
+✅ Экспорт / импорт данных
+✅ Отсутствие рекламы`, updatedUser.SubscriptionEnd.Format("02.01.2006"))
+		h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, text, nil)
+
+		// Уведомление
+		h.NotifyPaymentSuccess(callback.From.ID)
+	} else {
+		h.bot.Send(tgbotapi.NewCallback(callback.ID, "Оплата ещё не поступила"))
+	}
+}
+
+func (h *Handlers) handleExportDataCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	user, _ := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
+
+	if !user.HasActiveSubscription() {
+		text := "🔒 *Экспорт данных — Premium функция*"
+		keyboard := PremiumKeyboard("", user.DiscountPercent)
+		h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, text, &keyboard)
+		return
+	}
+
+	csvData, err := h.exportSvc.ExportToCSV(ctx, user.ID)
+	if err != nil {
+		h.sendError(callback.Message.Chat.ID, "Ошибка экспорта")
+		return
+	}
+
+	doc := tgbotapi.NewDocument(callback.Message.Chat.ID, tgbotapi.FileBytes{
+		Name:  fmt.Sprintf("habits_export_%s.csv", time.Now().Format("2006-01-02")),
+		Bytes: csvData,
+	})
+	doc.Caption = "📥 Твои данные экспортированы!"
+	h.bot.Send(doc)
+}
+
+func (h *Handlers) handleNeedPremiumReminder(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	user, _ := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
+
+	text := `🔒 *Напоминания — Premium функция*
+
+С напоминаниями ты не пропустишь ни одного дня!
+
+⏰ Бот напомнит тебе в нужное время.
+
+Оформи Premium!`
+
+	keyboard := PremiumKeyboard("", user.DiscountPercent)
+	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, text, &keyboard)
+}
+
+func (h *Handlers) handleCopyReferralCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	user, _ := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
+	referralLink, _ := h.referralSvc.GetReferralLink(ctx, user.ID, h.botUsername)
+
+	msg := tgbotapi.NewMessage(callback.Message.Chat.ID, referralLink)
+	h.bot.Send(msg)
+	h.bot.Send(tgbotapi.NewCallback(callback.ID, "Ссылка отправлена!"))
+}
+
+func (h *Handlers) handleMyReferralsCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	user, _ := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
+	referrals, _ := h.referralSvc.GetUserReferrals(ctx, user.ID)
+
+	var sb strings.Builder
+	sb.WriteString("📋 *Мои приглашения*\n\n")
+
+	if len(referrals) == 0 {
+		sb.WriteString("Ты ещё никого не пригласил.")
+	} else {
+		for i, ref := range referrals {
+			referred, _ := h.repo.GetUserByID(ctx, ref.ReferredID)
+			name := "Пользователь"
+			if referred != nil && referred.FirstName != "" {
+				name = referred.FirstName
+			}
+
+			stage1 := "✅"
+			stage2 := "⬜️"
+			if ref.Stage2Applied {
+				stage2 = "✅"
+			}
+
+			bonus := ref.Stage1BonusDays + ref.Stage2BonusDays
+			bonusText := fmt.Sprintf("+%d дн.", bonus)
+			if ref.GaveDiscount {
+				bonusText = "скидка"
+			}
+			sb.WriteString(fmt.Sprintf("%d. *%s* [%s|%s] %s\n", i+1, name, stage1, stage2, bonusText))
+		}
+	}
+
+	keyboard := BackKeyboard("back_to_referral")
+	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, sb.String(), &keyboard)
+}
+
+// ==================== NOTIFICATIONS ====================
+
+func (h *Handlers) notifyAchievement(telegramID int64, achievement *domain.AchievementConfig) {
+	bonus := ""
+	if achievement.BonusDays > 0 {
+		bonus = fmt.Sprintf("\n\n🎁 Бонус: *+%d дней* Premium!", achievement.BonusDays)
+	}
+
+	text := fmt.Sprintf(`%s *Новое достижение!*
+
+*%s*
+%s%s`, achievement.Emoji, achievement.Title, achievement.Description, bonus)
+
+	msg := tgbotapi.NewMessage(telegramID, text)
+	msg.ParseMode = "Markdown"
+	h.bot.Send(msg)
+}
+
+func (h *Handlers) notifyReferralStage2(ctx context.Context, result *service.ReferralResult, referredUser *domain.User) {
+	text := fmt.Sprintf(`🎉 *Этап 2 выполнен!*
+
+Ты отмечал привычки %d дней подряд!
+
+🎁 +%d дней Premium тебе и твоему пригласившему!`, domain.ReferralStage2Streak, result.ReferredBonus)
+
+	msg := tgbotapi.NewMessage(referredUser.TelegramID, text)
+	msg.ParseMode = "Markdown"
+	h.bot.Send(msg)
+
+	referrer, _ := h.repo.GetUserByID(ctx, result.ReferrerUserID)
+	if referrer != nil {
+		text := fmt.Sprintf(`🎉 *Реферал завершён!*
+
+*%s* достиг %d дней серии!
+
+🎁 *Этап 2:* +%d дней Premium!`, referredUser.FirstName, domain.ReferralStage2Streak, result.ReferrerBonus)
+
+		msg := tgbotapi.NewMessage(referrer.TelegramID, text)
+		msg.ParseMode = "Markdown"
+		h.bot.Send(msg)
+	}
+}
+
+func (h *Handlers) notifyReferralUnlock(telegramID int64) {
+	text := `🔓 *Реферальная программа разблокирована!*
+
+Ты выполнял привычки 7 дней подряд!
+
+Теперь можешь приглашать друзей:
+• *Этап 1:* +2 дня при регистрации
+• *Этап 2:* +3 дня при достижении серии
+
+Нажми "👥 Рефералы"!`
+
+	msg := tgbotapi.NewMessage(telegramID, text)
+	msg.ParseMode = "Markdown"
+	h.bot.Send(msg)
+}
+
+// ==================== ADS ====================
+
+func (h *Handlers) maybeShowAd(ctx context.Context, chatID int64, userID int64) {
+	shouldShow, _ := h.adSvc.ShouldShowAd(ctx, userID)
+	if !shouldShow {
+		return
+	}
+
+	ad := h.adSvc.GetRandomAd(ctx)
+	if ad == nil {
+		return
+	}
+
+	h.adSvc.TrackView(ctx, ad.ID)
+
+	msg := tgbotapi.NewMessage(chatID, ad.Text)
+	msg.ParseMode = "Markdown"
+	msg.ReplyMarkup = AdKeyboard(ad.ID)
+	h.bot.Send(msg)
+}
+
+// ==================== HELPERS ====================
+
+func (h *Handlers) sendMessage(chatID int64, text string) {
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = "Markdown"
+	h.bot.Send(msg)
+}
+
+func (h *Handlers) sendError(chatID int64, text string) {
+	msg := tgbotapi.NewMessage(chatID, "❌ "+text)
+	h.bot.Send(msg)
+}
+
+func (h *Handlers) editMessage(chatID int64, messageID int, text string, keyboard *tgbotapi.InlineKeyboardMarkup) {
+	edit := tgbotapi.NewEditMessageText(chatID, messageID, text)
+	edit.ParseMode = "Markdown"
+	if keyboard != nil {
+		edit.ReplyMarkup = keyboard
+	}
+	h.bot.Send(edit)
+}
+
+func (h *Handlers) SendReminder(telegramID int64, habitName string) error {
+	text := fmt.Sprintf("⏰ *Напоминание!*\n\nПора выполнить: *%s*", habitName)
+
+	msg := tgbotapi.NewMessage(telegramID, text)
+	msg.ParseMode = "Markdown"
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("✅ Отметить", "go_today"),
+		),
+	)
+
+	_, err := h.bot.Send(msg)
+	return err
+}
+
+func (h *Handlers) NotifyPaymentSuccess(telegramID int64) {
+	text := `🎉 *Оплата прошла успешно!*
+
+Твоя Premium подписка активирована на 30 дней!
+
+✅ Безлимитные привычки
+✅ Напоминания
+✅ Статистика за год
+✅ Экспорт данных
+✅ Без рекламы`
+
+	msg := tgbotapi.NewMessage(telegramID, text)
+	msg.ParseMode = "Markdown"
+	msg.ReplyMarkup = MainMenuKeyboard()
+	h.bot.Send(msg)
+}
