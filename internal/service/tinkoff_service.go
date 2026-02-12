@@ -50,9 +50,9 @@ func (s *TinkoffService) IsConfigured() bool {
 	return s.terminalKey != "" && s.password != ""
 }
 
-func (s *TinkoffService) CreatePayment(ctx context.Context, userID int64, baseAmount int64, originalAmount int64, discount int, description string) (*domain.Payment, error) {
+func (s *TinkoffService) CreatePayment(ctx context.Context, telegramID int64, baseAmount int64, originalAmount int64, discount int, description string) (*domain.Payment, error) {
 	// Проверяем промокод
-	promo, _ := s.repo.GetUserActivePromocode(ctx, userID)
+	promo, _ := s.repo.GetUserActivePromocode(ctx, telegramID)
 
 	finalAmount := baseAmount
 	discountPercent := 0
@@ -77,7 +77,7 @@ func (s *TinkoffService) CreatePayment(ctx context.Context, userID int64, baseAm
 		OrderId:     orderID,
 		Description: description,
 		Token:       token,
-		DATA:        &domain.TinkoffPaymentData{TelegramUserID: fmt.Sprintf("%d", userID)},
+		DATA:        &domain.TinkoffPaymentData{TelegramUserID: fmt.Sprintf("%d", telegramID)},
 	}
 
 	body, err := json.Marshal(req)
@@ -122,7 +122,7 @@ func (s *TinkoffService) CreatePayment(ctx context.Context, userID int64, baseAm
 		return nil, fmt.Errorf("tinkoff error: %s - %s", tinkoffResp.ErrorCode, tinkoffResp.Message)
 	}
 
-	user, err := s.repo.GetUserByID(ctx, userID)
+	user, err := s.repo.GetUserByTelegramID(ctx, telegramID)
 	if err != nil {
 		return nil, fmt.Errorf("get user: %w", err)
 	}
@@ -148,8 +148,8 @@ func (s *TinkoffService) CreatePayment(ctx context.Context, userID int64, baseAm
 
 	// После успешного создания — отмечаем промокод как использованный
 	if promo != nil {
-		s.repo.IncrementPromocodeUsage(ctx, promo.ID, userID)
-		s.repo.ClearUserActivePromocode(ctx, userID)
+		s.repo.IncrementPromocodeUsage(ctx, promo.ID, telegramID)
+		s.repo.ClearUserActivePromocode(ctx, telegramID)
 	}
 
 	return payment, nil

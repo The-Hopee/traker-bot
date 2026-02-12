@@ -923,11 +923,20 @@ func (h *Handlers) handleSubscribeCallback(ctx context.Context, callback *tgbota
 	}
 
 	user, _ := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
-	discount := user.DiscountPercent
-	originalAmount := h.subPrice
-	finalAmount := h.subSvc.GetPriceWithDiscount(discount)
 
-	payment, err := h.tinkoffSvc.CreatePayment(ctx, user.ID, finalAmount, originalAmount, discount, "Premium подписка на 1 месяц")
+	// Проверяем промокод
+	promo, _ := h.repo.GetUserActivePromocode(ctx, callback.From.ID)
+
+	// Берём максимальную скидку
+	discount := user.DiscountPercent
+	if promo != nil && promo.DiscountPercent > discount {
+		discount = promo.DiscountPercent
+	}
+
+	originalAmount := h.subPrice
+	finalAmount := originalAmount * int64(100-discount) / 100
+
+	payment, err := h.tinkoffSvc.CreatePayment(ctx, callback.From.ID, finalAmount, originalAmount, discount, "Premium подписка на 1 месяц")
 	if err != nil {
 		log.Printf("Error creating payment: %v", err)
 		h.sendError(callback.Message.Chat.ID, "Ошибка создания платежа")
