@@ -98,6 +98,18 @@ func (h *AdminHandlers) HandleAdminCommand(ctx context.Context, msg *tgbotapi.Me
 	case msg.Text == "/resumebroadcast":
 		h.resumeBroadcast(ctx, msg.Chat.ID)
 		return true
+	case msg.Text == "/promos":
+		h.showPromos(ctx, msg.Chat.ID)
+		return true
+	case strings.HasPrefix(msg.Text, "/addpromo "):
+		h.addPromo(ctx, msg)
+		return true
+	case strings.HasPrefix(msg.Text, "/delpromo "):
+		h.deletePromo(ctx, msg)
+		return true
+	case strings.HasPrefix(msg.Text, "/togglepromo "):
+		h.togglePromo(ctx, msg)
+		return true
 	}
 
 	return false
@@ -108,6 +120,12 @@ func (h *AdminHandlers) showAdminMenu(chatID int64) {
 
 *Статистика:*
 /stats - Общая статистика
+
+*Промокоды:*
+/promos - Список промокодов
+/addpromo CODE СКИДКА [ЛИМИТ] - Создать
+/delpromo CODE - Удалить
+/togglepromo CODE - Вкл/Выкл
 
 *Реклама:*
 /ads - Список рекламы
@@ -358,4 +376,81 @@ func (h *AdminHandlers) resumeBroadcast(ctx context.Context, chatID int64) {
 		return
 	}
 	h.bot.Send(tgbotapi.NewMessage(chatID, "▶️ Рассылка продолжена"))
+}
+
+func (h *AdminHandlers) showPromos(ctx context.Context, chatID int64) {
+	promos, _ := h.repo.GetAllPromocodes(ctx)
+
+	if len(promos) == 0 {
+		h.bot.Send(tgbotapi.NewMessage(chatID, "Нет промокодов"))
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString("🎟 *Промокоды:*\n\n")
+	for _, p := range promos {
+		status := "✅"
+		if !p.IsActive {
+			status = "❌"
+		}
+		sb.WriteString(fmt.Sprintf("%s %s — %d%%", status, p.Code, p.DiscountPercent))
+		sb.WriteString(fmt.Sprintf(" (исп: %d", p.UsedCount))
+		if p.MaxUses != nil {
+			sb.WriteString(fmt.Sprintf("/%d", *p.MaxUses))
+		}
+		sb.WriteString(")\n")
+	}
+
+	msg := tgbotapi.NewMessage(chatID, sb.String())
+	msg.ParseMode = "Markdown"
+	h.bot.Send(msg)
+}
+
+func (h *AdminHandlers) addPromo(ctx context.Context, msg *tgbotapi.Message) {
+	// /addpromo CODE 50 20
+	parts := strings.Fields(msg.Text)
+	if len(parts) < 3 {
+		h.bot.Send(tgbotapi.NewMessage(msg.Chat.ID,
+			"Формат: /addpromo CODE СКИДКА [ЛИМИТ]\nПример: /addpromo EARLYBIRD 50 20"))
+		return
+	}
+
+	code := strings.ToUpper(parts[1])
+	discount, err := strconv.Atoi(parts[2])
+	if err != nil || discount < 1 || discount > 100 {
+		h.bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ Скидка от 1 до 100"))
+		return
+	}
+
+	maxUses := 0
+	if len(parts) >= 4 {
+		maxUses, _ = strconv.Atoi(parts[3])
+	}
+
+	err = h.repo.CreatePromocode(ctx, code, discount, maxUses)
+	if err != nil {
+		h.bot.Send(tgbotapi.NewMessage(msg.Chat.ID, "❌ Ошибка: "+err.Error()))
+		return
+	}
+
+	text := fmt.Sprintf("✅ Промокод создан\n\nКод: `%s`\nСкидка: %d%%", code, discount)
+	if maxUses > 0 {
+		text += fmt.Sprintf("\nЛимит: %d", maxUses)
+	}
+
+	m := tgbotapi.NewMessage(msg.Chat.ID, text)
+	m.ParseMode = "Markdown"
+	h.bot.Send(m)
+}
+
+func (h *AdminHandlers) deletePromo(ctx context.Context, msg *tgbotapi.Message) {
+	code := strings.ToUpper(strings.TrimPrefix(msg.Text, "/delpromo "))
+	h.repo.DeletePromocode(ctx, code)
+	h.bot.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("✅ Промокод %s удалён", code)))
+}
+
+func (h *AdminHandlers) togglePromo(ctx context.Context, msg *tgbotapi.Message) {
+	code := strings.ToUpper(strings.TrimPrefix(msg.Text, "/togglepromo "))
+	h.repo.TogglePromocode(ctx, code)
+	h.bot.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("✅ Промокод %s переключён", code)))
 }

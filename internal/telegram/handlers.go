@@ -153,6 +153,9 @@ func (h *Handlers) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		h.handlePremium(ctx, msg)
 	case msg.Text == "❓ Помощь" || msg.Text == "/help":
 		h.handleHelp(ctx, msg)
+	case strings.HasPrefix(msg.Text, "/promo "):
+		code := strings.ToUpper(strings.TrimSpace(strings.TrimPrefix(msg.Text, "/promo ")))
+		h.applyPromocode(ctx, msg.Chat.ID, msg.From.ID, code)
 	default:
 		h.handleUnknown(ctx, msg)
 	}
@@ -1217,4 +1220,32 @@ func (h *Handlers) NotifyPaymentSuccess(telegramID int64) {
 	msg.ParseMode = "Markdown"
 	msg.ReplyMarkup = MainMenuKeyboard()
 	h.bot.Send(msg)
+}
+
+func (h *Handlers) applyPromocode(ctx context.Context, chatID int64, userID int64, code string) {
+	promo, err := h.repo.GetPromocodeByCode(ctx, code)
+	if err != nil || promo == nil || !promo.IsActive {
+		h.bot.Send(tgbotapi.NewMessage(chatID, "❌ Промокод не найден"))
+		return
+	}
+
+	// Проверяем лимит
+	if promo.MaxUses != nil && promo.UsedCount >= *promo.MaxUses {
+		h.bot.Send(tgbotapi.NewMessage(chatID, "❌ Промокод больше не действует"))
+		return
+	}
+
+	// Проверяем использовал ли
+	used, _ := h.repo.HasUserUsedPromocode(ctx, userID, promo.ID)
+	if used {
+		h.bot.Send(tgbotapi.NewMessage(chatID, "❌ Вы уже использовали этот промокод"))
+		return
+	}
+
+	// Сохраняем
+	h.repo.SetUserActivePromocode(ctx, userID, promo.ID)
+
+	h.bot.Send(tgbotapi.NewMessage(chatID,
+		fmt.Sprintf("✅ Промокод применён!\n\nСкидка: %d%%\n\nПерейдите к оплате — скидка применится автоматически.",
+			promo.DiscountPercent)))
 }

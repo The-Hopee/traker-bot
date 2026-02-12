@@ -50,12 +50,22 @@ func (s *TinkoffService) IsConfigured() bool {
 	return s.terminalKey != "" && s.password != ""
 }
 
-func (s *TinkoffService) CreatePayment(ctx context.Context, userID int64, amount int64, originalAmount int64, discount int, description string) (*domain.Payment, error) {
+func (s *TinkoffService) CreatePayment(ctx context.Context, userID int64, baseAmount int64, originalAmount int64, discount int, description string) (*domain.Payment, error) {
+	// Проверяем промокод
+	promo, _ := s.repo.GetUserActivePromocode(ctx, userID)
+
+	finalAmount := baseAmount
+	discountPercent := 0
+
+	if promo != nil {
+		discountPercent = promo.DiscountPercent
+		finalAmount = baseAmount * int64(100-discountPercent) / 100
+	}
 	orderID := uuid.New().String()
 
 	params := map[string]string{
 		"TerminalKey": s.terminalKey,
-		"Amount":      fmt.Sprintf("%d", amount),
+		"Amount":      fmt.Sprintf("%d", finalAmount), // уже со скидкой
 		"OrderId":     orderID,
 		"Description": description,
 	}
@@ -63,7 +73,7 @@ func (s *TinkoffService) CreatePayment(ctx context.Context, userID int64, amount
 
 	req := domain.TinkoffInitRequest{
 		TerminalKey: s.terminalKey,
-		Amount:      amount,
+		Amount:      finalAmount,
 		OrderId:     orderID,
 		Description: description,
 		Token:       token,
@@ -79,7 +89,7 @@ func (s *TinkoffService) CreatePayment(ctx context.Context, userID int64, amount
 	log.Printf("Tinkoff request URL: %s/Init", s.getAPIURL())
 	log.Printf("Tinkoff request body: %s", string(body))
 	log.Printf("Token input: TerminalKey=%s, Amount=%d, OrderId=%s, Description=%s, Password=%s",
-		s.terminalKey, amount, orderID, description, s.password)
+		s.terminalKey, baseAmount, orderID, description, s.password)
 
 	resp, err := s.httpClient.Post(s.getAPIURL()+"/Init", "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -121,9 +131,9 @@ func (s *TinkoffService) CreatePayment(ctx context.Context, userID int64, amount
 		UserID:          user.ID,
 		TinkoffID:       tinkoffResp.PaymentId,
 		OrderID:         orderID,
-		Amount:          amount,
-		OriginalAmount:  originalAmount,
-		DiscountPercent: discount,
+		Amount:          finalAmount,
+		OriginalAmount:  baseAmount,
+		DiscountPercent: discountPercent,
 		Status:          domain.PaymentStatus(tinkoffResp.Status),
 		PaymentURL:      tinkoffResp.PaymentURL,
 		Description:     description,
@@ -134,6 +144,12 @@ func (s *TinkoffService) CreatePayment(ctx context.Context, userID int64, amount
 
 	if err := s.repo.CreatePayment(ctx, payment); err != nil {
 		return nil, fmt.Errorf("save payment: %w", err)
+	}
+
+	// После успешного создания — отмечаем промокод как использованный
+	if promo != nil {
+		s.repo.IncrementPromocodeUsage(ctx, promo.ID, userID)
+		s.repo.ClearUserActivePromocode(ctx, userID)
 	}
 
 	return payment, nil

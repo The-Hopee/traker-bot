@@ -103,5 +103,17 @@ type Repository interface {
 	// Export
 	GetAllUserData(ctx context.Context, userID int64) (*UserExportData, error)
 
+	// Promocodes
+	CreatePromocode(ctx context.Context, code string, discount int, maxUses int) error
+	GetAllPromocodes(ctx context.Context) ([]*domain.Promocode, error)
+	GetPromocodeByCode(ctx context.Context, code string) (*domain.Promocode, error)
+	DeletePromocode(ctx context.Context, code string) error
+	TogglePromocode(ctx context.Context, code string) error
+	HasUserUsedPromocode(ctx context.Context, userID int64, promocodeID int64) (bool, error)
+	SetUserActivePromocode(ctx context.Context, userID int64, promocodeID int64) error
+	GetUserActivePromocode(ctx context.Context, userID int64) (*domain.Promocode, error)
+	ClearUserActivePromocode(ctx context.Context, userID int64) error
+	IncrementPromocodeUsage(ctx context.Context, promocodeID int64, userID int64) error
+
 	Close()
 }

@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -835,4 +836,122 @@ func (r *PostgresRepository) GetAllUserData(ctx context.Context, userID int64) (
 	achievements, _ := r.GetUserAchievements(ctx, userID)
 	stats, _ := r.GetUserStats(ctx, userID)
 	return &UserExportData{User: user, Habits: habits, Logs: logs, Achievements: achievements, Stats: stats}, nil
+}
+
+// ===== PROMOCODES =====
+
+func (r *PostgresRepository) CreatePromocode(ctx context.Context, code string, discount int, maxUses int) error {
+	var maxUsesPtr *int
+	if maxUses > 0 {
+		maxUsesPtr = &maxUses
+	}
+	_, err := r.db.Exec(ctx,
+		`INSERT INTO promocodes (code, discount_percent, max_uses) VALUES ($1, $2, $3)`,
+		code, discount, maxUsesPtr)
+	return err
+}
+
+func (r *PostgresRepository) GetAllPromocodes(ctx context.Context) ([]*domain.Promocode, error) {
+	rows, err := r.db.Query(ctx,
+		`SELECT id, code, discount_percent, max_uses, used_count, is_active, created_at 
+         FROM promocodes ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var promos []*domain.Promocode
+	for rows.Next() {
+		p := &domain.Promocode{}
+		err := rows.Scan(&p.ID, &p.Code, &p.DiscountPercent, &p.MaxUses, &p.UsedCount, &p.IsActive, &p.CreatedAt)
+		if err != nil {
+			return nil, err
+		}
+		promos = append(promos, p)
+	}
+	return promos, nil
+}
+
+func (r *PostgresRepository) GetPromocodeByCode(ctx context.Context, code string) (*domain.Promocode, error) {
+	p := &domain.Promocode{}
+	err := r.db.QueryRow(ctx,
+		`SELECT id, code, discount_percent, max_uses, used_count, is_active, created_at 
+         FROM promocodes WHERE code = $1`, code).
+		Scan(&p.ID, &p.Code, &p.DiscountPercent, &p.MaxUses, &p.UsedCount, &p.IsActive, &p.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return p, err
+}
+
+func (r *PostgresRepository) DeletePromocode(ctx context.Context, code string) error {
+	_, err := r.db.Exec(ctx, `DELETE FROM promocodes WHERE code = $1`, code)
+	return err
+}
+
+func (r *PostgresRepository) TogglePromocode(ctx context.Context, code string) error {
+	_, err := r.db.Exec(ctx,
+		`UPDATE promocodes SET is_active = NOT is_active WHERE code = $1`, code)
+	return err
+}
+
+func (r *PostgresRepository) HasUserUsedPromocode(ctx context.Context, userID int64, promocodeID int64) (bool, error) {
+	var exists bool
+	err := r.db.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM promocode_usages WHERE user_id = $1 AND promocode_id = $2)`,
+		userID, promocodeID).Scan(&exists)
+	return exists, err
+}
+
+func (r *PostgresRepository) SetUserActivePromocode(ctx context.Context, userID int64, promocodeID int64) error {
+	_, err := r.db.Exec(ctx,
+		`UPDATE users SET active_promocode_id = $1 WHERE telegram_id = $2`,
+		promocodeID, userID)
+	return err
+}
+
+func (r *PostgresRepository) GetUserActivePromocode(ctx context.Context, userID int64) (*domain.Promocode, error) {
+	p := &domain.Promocode{}
+	err := r.db.QueryRow(ctx,
+		`SELECT p.id, p.code, p.discount_percent, p.max_uses, p.used_count, p.is_active, p.created_at
+         FROM promocodes p
+         JOIN users u ON u.active_promocode_id = p.id
+         WHERE u.telegram_id = $1 AND p.is_active = true`, userID).
+		Scan(&p.ID, &p.Code, &p.DiscountPercent, &p.MaxUses, &p.UsedCount, &p.IsActive, &p.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+func (r *PostgresRepository) ClearUserActivePromocode(ctx context.Context, userID int64) error {
+	_, err := r.db.Exec(ctx,
+		`UPDATE users SET active_promocode_id = NULL WHERE telegram_id = $1`, userID)
+	return err
+}
+
+func (r *PostgresRepository) IncrementPromocodeUsage(ctx context.Context, promocodeID int64, userID int64) error {
+	tx, err := r.db.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx,
+		`INSERT INTO promocode_usages (promocode_id, user_id) VALUES ($1, $2)`,
+		promocodeID, userID)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx,
+		`UPDATE promocodes SET used_count = used_count + 1 WHERE id = $1`,
+		promocodeID)
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
