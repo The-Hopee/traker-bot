@@ -545,13 +545,25 @@ func (h *Handlers) handlePremium(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
+	// Проверяем промокод
+	promo, _ := h.repo.GetUserActivePromocode(ctx, msg.From.ID)
+
+	// Берём максимальную скидку: реферальную или промокод
 	discount := user.DiscountPercent
+	promoText := ""
+
+	if promo != nil && promo.DiscountPercent > discount {
+		discount = promo.DiscountPercent
+		promoText = fmt.Sprintf("\n🎟 Промокод %s применён!", promo.Code)
+	}
+
 	originalPrice := float64(h.subPrice) / 100
 	finalPrice := originalPrice * (1 - float64(discount)/100)
 
 	discountText := ""
 	if discount > 0 {
-		discountText = fmt.Sprintf("\n\n🎁 *Твоя скидка:* %d%%\n💰 Цена для тебя: *%.0f₽* ~~%.0f₽~~", discount, finalPrice, originalPrice)
+		discountText = fmt.Sprintf("\n\n🎁 *Твоя скидка:* %d%%%s\n💰 Цена для тебя: *%.0f₽* ~%.0f₽~",
+			discount, promoText, finalPrice, originalPrice)
 	}
 
 	text := fmt.Sprintf(`⭐️ *Premium подписка*
@@ -593,6 +605,7 @@ func (h *Handlers) handleHelp(ctx context.Context, msg *tgbotapi.Message) {
 /achievements - Достижения
 /referral - Рефералы
 /premium - Подписка
+/promo - использовать промокод
 
 *🆓 Бесплатно:*
 • До 3 привычек
