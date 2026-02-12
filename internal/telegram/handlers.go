@@ -582,7 +582,7 @@ func (h *Handlers) handlePremium(ctx context.Context, msg *tgbotapi.Message) {
 	var paymentURL string
 	if h.tinkoffSvc != nil && h.tinkoffSvc.IsConfigured() {
 		pending, _ := h.repo.GetUserPendingPayment(ctx, user.ID)
-		if pending != nil {
+		if pending != nil && pending.DiscountPercent == discount {
 			paymentURL = pending.PaymentURL
 		}
 	}
