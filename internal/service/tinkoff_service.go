@@ -50,22 +50,37 @@ func (s *TinkoffService) IsConfigured() bool {
 	return s.terminalKey != "" && s.password != ""
 }
 
-func (s *TinkoffService) CreatePayment(ctx context.Context, telegramID int64, baseAmount int64, originalAmount int64, discount int, description string) (*domain.Payment, error) {
+func (s *TinkoffService) CreatePayment(ctx context.Context, telegramID int64, baseAmount int64, description string) (*domain.Payment, error) {
+	// Получаем юзера
+	user, err := s.repo.GetUserByTelegramID(ctx, telegramID)
+	if err != nil {
+		return nil, fmt.Errorf("get user: %w", err)
+	}
+
 	// Проверяем промокод
 	promo, _ := s.repo.GetUserActivePromocode(ctx, telegramID)
 
-	finalAmount := baseAmount
-	discountPercent := 0
-
-	if promo != nil {
+	// Берём максимальную скидку: реферальную или промокод
+	discountPercent := user.DiscountPercent
+	if promo != nil && promo.DiscountPercent > discountPercent {
 		discountPercent = promo.DiscountPercent
-		finalAmount = baseAmount * int64(100-discountPercent) / 100
 	}
+
+	// Считаем финальную сумму
+	finalAmount := baseAmount
+	if discountPercent > 0 {
+		finalAmount = baseAmount * int64(100-discountPercent) / 100
+		// Минимум 100 копеек (1 рубль)
+		if finalAmount < 100 {
+			finalAmount = 100
+		}
+	}
+
 	orderID := uuid.New().String()
 
 	params := map[string]string{
 		"TerminalKey": s.terminalKey,
-		"Amount":      fmt.Sprintf("%d", finalAmount), // уже со скидкой
+		"Amount":      fmt.Sprintf("%d", finalAmount),
 		"OrderId":     orderID,
 		"Description": description,
 	}
@@ -85,11 +100,8 @@ func (s *TinkoffService) CreatePayment(ctx context.Context, telegramID int64, ba
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	// 👇 ДОБАВЬ ЭТО: логируем что отправляем
 	log.Printf("Tinkoff request URL: %s/Init", s.getAPIURL())
 	log.Printf("Tinkoff request body: %s", string(body))
-	log.Printf("Token input: TerminalKey=%s, Amount=%d, OrderId=%s, Description=%s, Password=%s",
-		s.terminalKey, baseAmount, orderID, description, s.password)
 
 	resp, err := s.httpClient.Post(s.getAPIURL()+"/Init", "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -97,7 +109,6 @@ func (s *TinkoffService) CreatePayment(ctx context.Context, telegramID int64, ba
 	}
 	defer resp.Body.Close()
 
-	// 👇 ДОБАВЬ ЭТО: логируем статус ответа
 	log.Printf("Tinkoff response status: %d", resp.StatusCode)
 
 	respBody, err := io.ReadAll(resp.Body)
@@ -105,10 +116,8 @@ func (s *TinkoffService) CreatePayment(ctx context.Context, telegramID int64, ba
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 
-	// 👇 ДОБАВЬ ЭТО: логируем сырой ответ
 	log.Printf("Tinkoff raw response: %s", string(respBody))
 
-	// 👇 ДОБАВЬ ЭТО: проверяем пустой ответ
 	if len(respBody) == 0 {
 		return nil, fmt.Errorf("empty response from Tinkoff API")
 	}
@@ -120,11 +129,6 @@ func (s *TinkoffService) CreatePayment(ctx context.Context, telegramID int64, ba
 
 	if !tinkoffResp.Success {
 		return nil, fmt.Errorf("tinkoff error: %s - %s", tinkoffResp.ErrorCode, tinkoffResp.Message)
-	}
-
-	user, err := s.repo.GetUserByTelegramID(ctx, telegramID)
-	if err != nil {
-		return nil, fmt.Errorf("get user: %w", err)
 	}
 
 	payment := &domain.Payment{
@@ -139,14 +143,11 @@ func (s *TinkoffService) CreatePayment(ctx context.Context, telegramID int64, ba
 		Description:     description,
 	}
 
-	log.Printf("Tinkoff Init request params: %+v", params)
-	log.Printf("Generated token: %s", token)
-
 	if err := s.repo.CreatePayment(ctx, payment); err != nil {
 		return nil, fmt.Errorf("save payment: %w", err)
 	}
 
-	// После успешного создания — отмечаем промокод как использованный
+	// Отмечаем промокод как использованный
 	if promo != nil {
 		s.repo.IncrementPromocodeUsage(ctx, promo.ID, telegramID)
 		s.repo.ClearUserActivePromocode(ctx, telegramID)

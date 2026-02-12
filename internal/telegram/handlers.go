@@ -922,30 +922,16 @@ func (h *Handlers) handleSubscribeCallback(ctx context.Context, callback *tgbota
 		return
 	}
 
-	user, _ := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
-
-	// Проверяем промокод
-	promo, _ := h.repo.GetUserActivePromocode(ctx, callback.From.ID)
-
-	// Берём максимальную скидку
-	discount := user.DiscountPercent
-	if promo != nil && promo.DiscountPercent > discount {
-		discount = promo.DiscountPercent
-	}
-
-	originalAmount := h.subPrice
-	finalAmount := originalAmount * int64(100-discount) / 100
-
-	payment, err := h.tinkoffSvc.CreatePayment(ctx, callback.From.ID, finalAmount, originalAmount, discount, "Premium подписка на 1 месяц")
+	payment, err := h.tinkoffSvc.CreatePayment(ctx, callback.From.ID, h.subPrice, "Premium подписка на 1 месяц")
 	if err != nil {
 		log.Printf("Error creating payment: %v", err)
 		h.sendError(callback.Message.Chat.ID, "Ошибка создания платежа")
 		return
 	}
 
-	priceText := fmt.Sprintf("%.0f₽", float64(finalAmount)/100)
-	if discount > 0 {
-		priceText = fmt.Sprintf("%.0f₽ (скидка %d%%)", float64(finalAmount)/100, discount)
+	priceText := fmt.Sprintf("%.0f₽", float64(payment.Amount)/100)
+	if payment.DiscountPercent > 0 {
+		priceText = fmt.Sprintf("%.0f₽ (скидка %d%%)", float64(payment.Amount)/100, payment.DiscountPercent)
 	}
 
 	text := fmt.Sprintf(`💳 *Оплата подписки*
@@ -955,7 +941,7 @@ func (h *Handlers) handleSubscribeCallback(ctx context.Context, callback *tgbota
 Нажми кнопку для оплаты.
 После оплаты нажми "Проверить оплату".`, priceText)
 
-	keyboard := PremiumKeyboard(payment.PaymentURL, discount)
+	keyboard := PremiumKeyboard(payment.PaymentURL, payment.DiscountPercent)
 	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, text, &keyboard)
 }
 
