@@ -97,3 +97,7 @@ func (b *Bot) GetHandlers() *Handlers {
 func (b *Bot) GetBroadcastService() *service.BroadcastService {
 	return b.broadcastSvc
 }
+
+func (b *Bot) GetBotAPI() *tgbotapi.BotAPI {
+	return b.api
+}
