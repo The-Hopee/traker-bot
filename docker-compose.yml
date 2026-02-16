@@ -18,6 +18,7 @@ services:
       - ADMIN_TELEGRAM_ID=${ADMIN_TELEGRAM_ID}
       - PORT=8080
       - ENVIRONMENT=production
+      - TZ=Europe/Moscow
     depends_on:
       db:
         condition: service_healthy
