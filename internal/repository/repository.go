@@ -121,5 +121,7 @@ type Repository interface {
 	GetUsersForWeeklyPromo(ctx context.Context) ([]int64, error)
 	MarkWeeklyPromoSent(ctx context.Context, userID int64) error
 
+	UpdateHabitReminder(ctx context.Context, habitID int64, reminderTime *string, reminderDays []int) error
+
 	Close()
 }

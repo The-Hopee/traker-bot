@@ -1017,3 +1017,12 @@ func (r *PostgresRepository) MarkWeeklyPromoSent(ctx context.Context, userID int
     `, userID)
 	return err
 }
+
+func (r *PostgresRepository) UpdateHabitReminder(ctx context.Context, habitID int64, reminderTime *string, reminderDays []int) error {
+	_, err := r.db.Exec(ctx, `
+        UPDATE habits 
+        SET reminder_time = $1, reminder_days = $2
+        WHERE id = $3
+    `, reminderTime, reminderDays, habitID)
+	return err
+}

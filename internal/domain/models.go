@@ -54,6 +54,7 @@ type Habit struct {
 	IsActive     bool
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+	ReminderDays []int // [1,2,3,4,5] = пн-пт, [1,2,3,4,5,6,7] = все дни
 }
 
 type Frequency string

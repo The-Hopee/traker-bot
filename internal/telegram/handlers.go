@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -16,9 +18,21 @@ import (
 	"habit-tracker-bot/internal/service"
 )
 
+const (
+	StateNone                = "none"
+	StateWaitingHabitName    = "waiting_habit_name"
+	StateWaitingReminderMode = "waiting_reminder_mode"
+	StateWaitingCustomTime   = "waiting_custom_time"
+	StateWaitingReminderDays = "waiting_reminder_days"
+	StateWaitingCustomDays   = "waiting_custom_days"
+)
+
 type UserState struct {
-	State     string
-	HabitName string
+	State        string
+	HabitName    string
+	Frequency    string
+	ReminderTime string
+	SelectedDays map[int]bool
 }
 
 type Handlers struct {
@@ -305,7 +319,8 @@ func (h *Handlers) handleNewHabit(ctx context.Context, msg *tgbotapi.Message) {
 }
 
 func (h *Handlers) handleUserState(ctx context.Context, msg *tgbotapi.Message, state *UserState) {
-	if state.State == "awaiting_name" {
+	switch state.State {
+	case "awaiting_name":
 		if len(msg.Text) > 100 {
 			h.sendError(msg.Chat.ID, "Название слишком длинное (макс. 100 символов)")
 			return
@@ -317,6 +332,20 @@ func (h *Handlers) handleUserState(ctx context.Context, msg *tgbotapi.Message, s
 		reply := tgbotapi.NewMessage(msg.Chat.ID, text)
 		reply.ParseMode = "Markdown"
 		reply.ReplyMarkup = FrequencyKeyboard()
+		h.bot.Send(reply)
+
+	case StateWaitingCustomTime:
+		matched, _ := regexp.MatchString(`^\d{1,2}:\d{2}$`, msg.Text)
+		if !matched {
+			h.sendMessage(msg.Chat.ID, "❌ Введи время в формате ЧЧ:ММ (например 08:30):")
+			return
+		}
+		state.ReminderTime = msg.Text
+		state.State = StateWaitingReminderDays
+
+		keyboard := ReminderDaysKeyboard()
+		reply := tgbotapi.NewMessage(msg.Chat.ID, "📅 В какие дни напоминать?")
+		reply.ReplyMarkup = keyboard
 		h.bot.Send(reply)
 	}
 }
@@ -664,6 +693,18 @@ func (h *Handlers) handleCallback(ctx context.Context, callback *tgbotapi.Callba
 	case strings.HasPrefix(data, "stats_"):
 		h.handleStatsCallback(ctx, callback)
 
+	case strings.HasPrefix(data, "reminder_mode:"):
+		h.handleReminderModeCallback(ctx, callback)
+
+	case strings.HasPrefix(data, "reminder_time:"):
+		h.handleReminderTimeCallback(ctx, callback)
+
+	case strings.HasPrefix(data, "reminder_days:"):
+		h.handleReminderDaysCallback(ctx, callback)
+
+	case strings.HasPrefix(data, "reminder_toggle_day:"):
+		h.handleReminderToggleDayCallback(ctx, callback)
+
 	case strings.HasPrefix(data, "reminder_"):
 		h.handleReminderCallback(ctx, callback)
 
@@ -710,30 +751,22 @@ func (h *Handlers) handleFrequencyCallback(ctx context.Context, callback *tgbota
 		return
 	}
 
-	freq := domain.Frequency(strings.TrimPrefix(callback.Data, "freq_"))
+	freq := strings.TrimPrefix(callback.Data, "freq_")
+	state.Frequency = freq
+	state.State = StateWaitingReminderMode
 
-	user, err := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
-	if err != nil {
-		h.sendError(callback.Message.Chat.ID, "Ошибка")
-		return
-	}
+	user, _ := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
 
-	habit, err := h.habitSvc.CreateHabit(ctx, user, state.HabitName, "", freq)
-	if err != nil {
-		if errors.Is(err, service.ErrHabitLimitReached) {
-			h.sendError(callback.Message.Chat.ID, "Достигнут лимит привычек")
-		} else {
-			h.sendError(callback.Message.Chat.ID, "Ошибка создания")
-		}
+	// Если не Premium — сразу создаём без напоминания
+	if !user.HasActiveSubscription() {
+		h.createHabitFinal(ctx, callback.Message.Chat.ID, callback.From.ID, state)
 		delete(h.userStates, callback.From.ID)
 		return
 	}
 
-	delete(h.userStates, callback.From.ID)
-
-	text := fmt.Sprintf("✅ Привычка *%s* создана!", habit.Name)
-	keyboard := BackKeyboard("back_to_habits")
-	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, text, &keyboard)
+	// Premium — спрашиваем про напоминание
+	keyboard := ReminderModeKeyboard()
+	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, "⏰ Настроить напоминание?", &keyboard)
 }
 
 func (h *Handlers) handleCompleteCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
@@ -1256,4 +1289,170 @@ func (h *Handlers) applyPromocode(ctx context.Context, chatID int64, userID int6
 	h.bot.Send(tgbotapi.NewMessage(chatID,
 		fmt.Sprintf("✅ Промокод применён!\n\nСкидка: %d%%\n\nПерейдите к оплате — скидка применится автоматически.",
 			promo.DiscountPercent)))
+}
+
+func (h *Handlers) handleReminderModeCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	state, ok := h.userStates[callback.From.ID]
+	if !ok {
+		return
+	}
+
+	mode := strings.TrimPrefix(callback.Data, "reminder_mode:")
+
+	switch mode {
+	case "preset":
+		keyboard := ReminderPresetTimeKeyboard()
+		h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, "⏰ Выбери время:", &keyboard)
+
+	case "custom":
+		state.State = StateWaitingCustomTime
+		h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, "✏️ Введи время в формате ЧЧ:ММ (например 14:30):", nil)
+
+	case "none":
+		h.createHabitFinal(ctx, callback.Message.Chat.ID, callback.From.ID, state)
+		delete(h.userStates, callback.From.ID)
+
+	case "back":
+		state.State = "awaiting_frequency"
+		keyboard := FrequencyKeyboard()
+		h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, "📅 Выбери периодичность:", &keyboard)
+	}
+}
+
+func (h *Handlers) handleReminderTimeCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	state, ok := h.userStates[callback.From.ID]
+	if !ok {
+		return
+	}
+
+	timeVal := strings.TrimPrefix(callback.Data, "reminder_time:")
+	state.ReminderTime = timeVal
+	state.State = StateWaitingReminderDays
+
+	keyboard := ReminderDaysKeyboard()
+	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, "📅 В какие дни напоминать?", &keyboard)
+}
+
+func (h *Handlers) handleReminderDaysCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	state, ok := h.userStates[callback.From.ID]
+	if !ok {
+		return
+	}
+
+	daysVal := strings.TrimPrefix(callback.Data, "reminder_days:")
+
+	switch daysVal {
+	case "all":
+		state.SelectedDays = map[int]bool{1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true}
+		h.createHabitFinal(ctx, callback.Message.Chat.ID, callback.From.ID, state)
+		delete(h.userStates, callback.From.ID)
+
+	case "weekdays":
+		state.SelectedDays = map[int]bool{1: true, 2: true, 3: true, 4: true, 5: true}
+		h.createHabitFinal(ctx, callback.Message.Chat.ID, callback.From.ID, state)
+		delete(h.userStates, callback.From.ID)
+
+	case "weekends":
+		state.SelectedDays = map[int]bool{6: true, 7: true}
+		h.createHabitFinal(ctx, callback.Message.Chat.ID, callback.From.ID, state)
+		delete(h.userStates, callback.From.ID)
+
+	case "custom":
+		state.State = StateWaitingCustomDays
+		if state.SelectedDays == nil {
+			state.SelectedDays = make(map[int]bool)
+		}
+		keyboard := ReminderCustomDaysKeyboard(state.SelectedDays)
+		h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, "📅 Выбери дни:", &keyboard)
+
+	case "done":
+		if len(state.SelectedDays) == 0 {
+			state.SelectedDays = map[int]bool{1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true}
+		}
+		h.createHabitFinal(ctx, callback.Message.Chat.ID, callback.From.ID, state)
+		delete(h.userStates, callback.From.ID)
+	}
+}
+
+func (h *Handlers) handleReminderToggleDayCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	state, ok := h.userStates[callback.From.ID]
+	if !ok {
+		return
+	}
+
+	day, _ := strconv.Atoi(strings.TrimPrefix(callback.Data, "reminder_toggle_day:"))
+
+	if state.SelectedDays == nil {
+		state.SelectedDays = make(map[int]bool)
+	}
+	state.SelectedDays[day] = !state.SelectedDays[day]
+
+	keyboard := ReminderCustomDaysKeyboard(state.SelectedDays)
+	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, "📅 Выбери дни:", &keyboard)
+}
+
+func (h *Handlers) createHabitFinal(ctx context.Context, chatID int64, telegramID int64, state *UserState) {
+	user, err := h.repo.GetUserByTelegramID(ctx, telegramID)
+	if err != nil {
+		h.sendError(chatID, "Ошибка")
+		return
+	}
+
+	freq := domain.Frequency(state.Frequency)
+
+	// Подготовка напоминания
+	var reminderTime *string
+	var reminderDays []int
+
+	if state.ReminderTime != "" {
+		reminderTime = &state.ReminderTime
+		for d, selected := range state.SelectedDays {
+			if selected {
+				reminderDays = append(reminderDays, d)
+			}
+		}
+		sort.Ints(reminderDays)
+	}
+
+	habit, err := h.habitSvc.CreateHabit(ctx, user, state.HabitName, "", freq)
+	if err != nil {
+		h.sendError(chatID, "Ошибка создания привычки")
+		return
+	}
+
+	// Если есть напоминание — обновляем
+	if reminderTime != nil && len(reminderDays) > 0 {
+		h.repo.UpdateHabitReminder(ctx, habit.ID, reminderTime, reminderDays)
+	}
+
+	text := fmt.Sprintf("✅ Привычка *%s* создана!", habit.Name)
+	if reminderTime != nil {
+		daysText := formatDays(reminderDays)
+		text += fmt.Sprintf("\n⏰ Напоминание: *%s* (%s)", *reminderTime, daysText)
+	}
+
+	keyboard := BackKeyboard("back_to_habits")
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = "Markdown"
+	msg.ReplyMarkup = keyboard
+	h.bot.Send(msg)
+}
+
+func formatDays(days []int) string {
+	if len(days) == 0 || len(days) == 7 {
+		return "каждый день"
+	}
+	if len(days) == 5 && days[0] == 1 && days[4] == 5 {
+		return "по будням"
+	}
+	if len(days) == 2 && days[0] == 6 && days[1] == 7 {
+		return "по выходным"
+	}
+
+	names := map[int]string{1: "пн", 2: "вт", 3: "ср", 4: "чт", 5: "пт", 6: "сб", 7: "вс"}
+	var result []string
+	for _, d := range days {
+		result = append(result, names[d])
+	}
+	return strings.Join(result, ", ")
 }
