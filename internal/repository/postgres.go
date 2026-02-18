@@ -1032,13 +1032,14 @@ func (r *PostgresRepository) UpdateHabitReminder(ctx context.Context, habitID in
 // GetWeeklyCompletionStats — количество выполненных привычек по дням за 7 дней
 func (r *PostgresRepository) GetWeeklyCompletionStats(ctx context.Context, userID int64) (map[string]int, error) {
 	rows, err := r.db.Query(ctx, `
-	  SELECT DATE(hc.completed_at)::date as date, COUNT(*)::int as count
-	  FROM habit_completions hc
-	  JOIN habits h ON hc.habit_id = h.id
+	  SELECT hl.date, COUNT(*)::int as count
+	  FROM habit_logs hl
+	  JOIN habits h ON hl.habit_id = h.id
 	  WHERE h.user_id = $1 
-		AND hc.completed_at >= CURRENT_DATE - INTERVAL '6 days'
-	  GROUP BY DATE(hc.completed_at)
-	  ORDER BY date
+		AND hl.date >= CURRENT_DATE - INTERVAL '6 days'
+		AND hl.completed = true
+	  GROUP BY hl.date
+	  ORDER BY hl.date
 	`, userID)
 	if err != nil {
 		return nil, err
@@ -1060,10 +1061,11 @@ func (r *PostgresRepository) GetWeeklyCompletionStats(ctx context.Context, userI
 // GetHabitCompletionDays — дни выполнения конкретной привычки
 func (r *PostgresRepository) GetHabitCompletionDays(ctx context.Context, habitID int64, days int) (map[string]bool, error) {
 	rows, err := r.db.Query(ctx, `
-	  SELECT DATE(completed_at)
-	  FROM habit_completions
+	  SELECT date
+	  FROM habit_logs
 	  WHERE habit_id = $1 
-		AND completed_at >= CURRENT_DATE - $2 * INTERVAL '1 day'
+		AND date >= CURRENT_DATE - $2 * INTERVAL '1 day'
+		AND completed = true
 	`, habitID, days)
 	if err != nil {
 		return nil, err
@@ -1100,7 +1102,6 @@ func (r *PostgresRepository) GetHabitsStreaks(ctx context.Context, userID int64)
 		if err := rows.Scan(&hs.HabitID, &hs.Name); err != nil {
 			return nil, err
 		}
-		// Получаем серию отдельным запросом
 		hs.Streak = r.calculateHabitStreak(ctx, hs.HabitID)
 		result = append(result, hs)
 	}
@@ -1109,10 +1110,10 @@ func (r *PostgresRepository) GetHabitsStreaks(ctx context.Context, userID int64)
 
 func (r *PostgresRepository) calculateHabitStreak(ctx context.Context, habitID int64) int {
 	rows, err := r.db.Query(ctx, `
-	  SELECT DATE(completed_at) as d
-	  FROM habit_completions
-	  WHERE habit_id = $1
-	  ORDER BY d DESC
+	  SELECT date
+	  FROM habit_logs
+	  WHERE habit_id = $1 AND completed = true
+	  ORDER BY date DESC
 	  LIMIT 365
 	`, habitID)
 	if err != nil {
