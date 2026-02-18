@@ -1477,14 +1477,22 @@ func formatDays(days []int) string {
 // ==================== CHARTS ====================
 
 func (h *Handlers) handleChartWeeklyCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
-	user, _ := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
+	user, err := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
+	if err != nil {
+		log.Printf("Chart weekly: ошибка получения юзера: %v", err)
+		h.sendError(callback.Message.Chat.ID, "Ошибка загрузки данных")
+		return
+	}
 
 	// Получаем данные за неделю
 	weeklyStats, err := h.repo.GetWeeklyCompletionStats(ctx, user.ID)
 	if err != nil {
-		h.sendError(callback.Message.Chat.ID, "Ошибка загрузки данных")
-		return
+		log.Printf("Chart weekly: ошибка GetWeeklyCompletionStats для user.ID=%d: %v", user.ID, err)
+		// Если ошибка — просто создаём пустой график
+		weeklyStats = make(map[string]int)
 	}
+
+	log.Printf("Chart weekly: weeklyStats=%v", weeklyStats)
 
 	// Формируем данные для графика
 	var labels []string
@@ -1508,6 +1516,7 @@ func (h *Handlers) handleChartWeeklyCallback(ctx context.Context, callback *tgbo
 	}
 
 	chartURL := GenerateWeeklyChart(chartData)
+	log.Printf("Chart weekly URL: %s", chartURL[:100]) // первые 100 символов
 
 	// Отправляем картинку
 	photo := tgbotapi.NewPhoto(callback.Message.Chat.ID, tgbotapi.FileURL(chartURL))
@@ -1533,14 +1542,23 @@ func (h *Handlers) handleChartStreaksCallback(ctx context.Context, callback *tgb
 	user, _ := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
 
 	streaks, err := h.repo.GetHabitsStreaks(ctx, user.ID)
-	if err != nil || len(streaks) == 0 {
+	if err != nil {
+		log.Printf("Chart streaks: ошибка GetHabitsStreaks: %v", err)
 		h.sendError(callback.Message.Chat.ID, "Нет данных для графика")
+		return
+	}
+
+	log.Printf("Chart streaks: получено %d привычек", len(streaks))
+
+	if len(streaks) == 0 {
+		h.sendError(callback.Message.Chat.ID, "У тебя нет привычек")
 		return
 	}
 
 	// Конвертируем в формат для графика
 	var chartData []HabitStreakData
 	for _, s := range streaks {
+		log.Printf("Chart streaks: %s = %d дней", s.Name, s.Streak)
 		chartData = append(chartData, HabitStreakData{
 			Name:   s.Name,
 			Streak: s.Streak,
@@ -1548,10 +1566,11 @@ func (h *Handlers) handleChartStreaksCallback(ctx context.Context, callback *tgb
 	}
 
 	chartURL := GenerateStreakChart(chartData)
+	log.Printf("Chart streaks URL length: %d", len(chartURL))
 
 	// Отправляем картинку
 	photo := tgbotapi.NewPhoto(callback.Message.Chat.ID, tgbotapi.FileURL(chartURL))
-	photo.Caption = "🔥 *Текущие серии привычек*"
+	photo.Caption = "🔥 *Текущие серии привычек*\n\nЧем длиннее полоска — тем дольше серия!"
 	photo.ParseMode = "Markdown"
 
 	h.bot.Request(tgbotapi.NewDeleteMessage(callback.Message.Chat.ID, callback.Message.MessageID))

@@ -121,36 +121,53 @@ func GenerateStreakChart(habits []HabitStreakData) string {
 	var values []string
 
 	for _, h := range habits {
-		labels = append(labels, h.Name)
+		// Обрезаем длинные названия
+		name := h.Name
+		if len(name) > 15 {
+			name = name[:12] + "..."
+		}
+		labels = append(labels, name)
 		values = append(values, fmt.Sprintf("%d", h.Streak))
 	}
 
 	labelsJSON := `["` + strings.Join(labels, `","`) + `"]`
 	valuesJSON := strings.Join(values, ",")
 
+	// Используем обычный bar вместо horizontalBar
 	chartConfig := fmt.Sprintf(`{
-    "type": "horizontalBar",
-    "data": {
-      "labels": %s,
-      "datasets": [{
-        "label": "Дней подряд",
-        "data": [%s],
-        "backgroundColor": "rgba(255, 159, 64, 0.8)"
-      }]
-    },
-    "options": {
-      "scales": {
-        "x": {"beginAtZero": true}
-      },
-      "plugins": {
-        "legend": {"display": false},
-        "title": {
-          "display": true,
-          "text": "🔥 Текущие серии"
-        }
-      }
-    }
-  }`, labelsJSON, valuesJSON)
+	  "type": "bar",
+	  "data": {
+		"labels": %s,
+		"datasets": [{
+		  "label": "Дней подряд",
+		  "data": [%s],
+		  "backgroundColor": [
+			"rgba(255, 99, 132, 0.8)",
+			"rgba(54, 162, 235, 0.8)",
+			"rgba(255, 206, 86, 0.8)",
+			"rgba(75, 192, 192, 0.8)",
+			"rgba(153, 102, 255, 0.8)",
+			"rgba(255, 159, 64, 0.8)"
+		  ]
+		}]
+	  },
+	  "options": {
+		"indexAxis": "y",
+		"scales": {
+		  "x": {
+			"beginAtZero": true,
+			"ticks": {"stepSize": 1}
+		  }
+		},
+		"plugins": {
+		  "legend": {"display": false},
+		  "title": {
+			"display": true,
+			"text": "Текущие серии (дней подряд)"
+		  }
+		}
+	  }
+	}`, labelsJSON, valuesJSON)
 
 	return "https://quickchart.io/chart?c=" + url.QueryEscape(chartConfig)
 }

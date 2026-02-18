@@ -1032,7 +1032,7 @@ func (r *PostgresRepository) UpdateHabitReminder(ctx context.Context, habitID in
 // GetWeeklyCompletionStats — количество выполненных привычек по дням за 7 дней
 func (r *PostgresRepository) GetWeeklyCompletionStats(ctx context.Context, userID int64) (map[string]int, error) {
 	rows, err := r.db.Query(ctx, `
-	  SELECT DATE(hc.completed_at) as date, COUNT(*) as count
+	  SELECT DATE(hc.completed_at)::date as date, COUNT(*)::int as count
 	  FROM habit_completions hc
 	  JOIN habits h ON hc.habit_id = h.id
 	  WHERE h.user_id = $1 
@@ -1084,41 +1084,6 @@ func (r *PostgresRepository) GetHabitCompletionDays(ctx context.Context, habitID
 // GetHabitsStreaks — серии всех привычек пользователя
 func (r *PostgresRepository) GetHabitsStreaks(ctx context.Context, userID int64) ([]HabitStreak, error) {
 	rows, err := r.db.Query(ctx, `
-	  SELECT h.id, h.name, COALESCE(
-		(SELECT COUNT(*)::int FROM (
-		  SELECT DATE(completed_at) as d
-		  FROM habit_completions
-		  WHERE habit_id = h.id
-			AND completed_at >= CURRENT_DATE - INTERVAL '365 days'
-		  ORDER BY d DESC
-		) dates
-		WHERE d >= CURRENT_DATE - (ROW_NUMBER() OVER (ORDER BY d DESC) - 1) * INTERVAL '1 day'
-		), 0
-	  ) as streak
-	  FROM habits h
-	  WHERE h.user_id = $1 AND h.is_active = true
-	  ORDER BY h.name
-	`, userID)
-	if err != nil {
-		// Упрощённый запрос если сложный не работает
-		return r.getHabitsStreaksSimple(ctx, userID)
-	}
-	defer rows.Close()
-
-	var result []HabitStreak
-	for rows.Next() {
-		var hs HabitStreak
-		if err := rows.Scan(&hs.HabitID, &hs.Name, &hs.Streak); err != nil {
-			return nil, err
-		}
-		result = append(result, hs)
-	}
-	return result, nil
-}
-
-// Упрощённая версия
-func (r *PostgresRepository) getHabitsStreaksSimple(ctx context.Context, userID int64) ([]HabitStreak, error) {
-	rows, err := r.db.Query(ctx, `
 	  SELECT h.id, h.name
 	  FROM habits h
 	  WHERE h.user_id = $1 AND h.is_active = true
@@ -1135,14 +1100,14 @@ func (r *PostgresRepository) getHabitsStreaksSimple(ctx context.Context, userID 
 		if err := rows.Scan(&hs.HabitID, &hs.Name); err != nil {
 			return nil, err
 		}
-		// Получаем серию отдельно
-		hs.Streak = r.calculateStreak(ctx, hs.HabitID)
+		// Получаем серию отдельным запросом
+		hs.Streak = r.calculateHabitStreak(ctx, hs.HabitID)
 		result = append(result, hs)
 	}
 	return result, nil
 }
 
-func (r *PostgresRepository) calculateStreak(ctx context.Context, habitID int64) int {
+func (r *PostgresRepository) calculateHabitStreak(ctx context.Context, habitID int64) int {
 	rows, err := r.db.Query(ctx, `
 	  SELECT DATE(completed_at) as d
 	  FROM habit_completions
@@ -1158,7 +1123,9 @@ func (r *PostgresRepository) calculateStreak(ctx context.Context, habitID int64)
 	var dates []time.Time
 	for rows.Next() {
 		var d time.Time
-		rows.Scan(&d)
+		if err := rows.Scan(&d); err != nil {
+			continue
+		}
 		dates = append(dates, d)
 	}
 
