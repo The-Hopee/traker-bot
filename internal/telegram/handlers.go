@@ -410,8 +410,11 @@ func (h *Handlers) handleStats(ctx context.Context, msg *tgbotapi.Message) {
 		sb.WriteString(fmt.Sprintf("  📈 Выполнено: %.0f%%\n\n", s.CompletionRate))
 	}
 
+	sb.WriteString("👇 *Выбери график:*")
+
 	reply := tgbotapi.NewMessage(msg.Chat.ID, sb.String())
 	reply.ParseMode = "Markdown"
+	reply.ReplyMarkup = StatsKeyboard()
 	h.bot.Send(reply)
 
 	h.maybeShowAd(ctx, msg.Chat.ID, user.ID)
@@ -740,6 +743,20 @@ func (h *Handlers) handleCallback(ctx context.Context, callback *tgbotapi.Callba
 
 	case data == "my_referrals":
 		h.handleMyReferralsCallback(ctx, callback)
+	case data == "chart_weekly":
+		h.handleChartWeeklyCallback(ctx, callback)
+
+	case data == "chart_streaks":
+		h.handleChartStreaksCallback(ctx, callback)
+
+	case data == "chart_calendar":
+		h.handleChartCalendarCallback(ctx, callback)
+
+	case strings.HasPrefix(data, "chart_habit_"):
+		h.handleChartHabitCallback(ctx, callback)
+
+	case data == "back_to_stats" || data == "back_to_stats_text":
+		h.handleBackToStatsCallback(ctx, callback)
 	case strings.HasPrefix(data, "close_ad_"):
 		h.bot.Send(tgbotapi.NewDeleteMessage(callback.Message.Chat.ID, callback.Message.MessageID))
 	}
@@ -1455,4 +1472,166 @@ func formatDays(days []int) string {
 		result = append(result, names[d])
 	}
 	return strings.Join(result, ", ")
+}
+
+// ==================== CHARTS ====================
+
+func (h *Handlers) handleChartWeeklyCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	user, _ := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
+
+	// Получаем данные за неделю
+	weeklyStats, err := h.repo.GetWeeklyCompletionStats(ctx, user.ID)
+	if err != nil {
+		h.sendError(callback.Message.Chat.ID, "Ошибка загрузки данных")
+		return
+	}
+
+	// Формируем данные для графика
+	var labels []string
+	var values []int
+
+	now := time.Now()
+	dayNames := []string{"Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"}
+
+	for i := 6; i >= 0; i-- {
+		date := now.AddDate(0, 0, -i)
+		dateStr := date.Format("2006-01-02")
+		dayName := dayNames[int(date.Weekday())]
+
+		labels = append(labels, dayName)
+		values = append(values, weeklyStats[dateStr])
+	}
+
+	chartData := ChartData{
+		Labels: labels,
+		Values: values,
+	}
+
+	chartURL := GenerateWeeklyChart(chartData)
+
+	// Отправляем картинку
+	photo := tgbotapi.NewPhoto(callback.Message.Chat.ID, tgbotapi.FileURL(chartURL))
+	photo.Caption = "📊 *Выполнено привычек за неделю*"
+	photo.ParseMode = "Markdown"
+
+	// Удаляем старое сообщение
+	h.bot.Request(tgbotapi.NewDeleteMessage(callback.Message.Chat.ID, callback.Message.MessageID))
+	h.bot.Send(photo)
+
+	// Кнопка "Назад"
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("« Назад к статистике", "back_to_stats_text"),
+		),
+	)
+	msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "👆 График выше")
+	msg.ReplyMarkup = keyboard
+	h.bot.Send(msg)
+}
+
+func (h *Handlers) handleChartStreaksCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	user, _ := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
+
+	streaks, err := h.repo.GetHabitsStreaks(ctx, user.ID)
+	if err != nil || len(streaks) == 0 {
+		h.sendError(callback.Message.Chat.ID, "Нет данных для графика")
+		return
+	}
+
+	// Конвертируем в формат для графика
+	var chartData []HabitStreakData
+	for _, s := range streaks {
+		chartData = append(chartData, HabitStreakData{
+			Name:   s.Name,
+			Streak: s.Streak,
+		})
+	}
+
+	chartURL := GenerateStreakChart(chartData)
+
+	// Отправляем картинку
+	photo := tgbotapi.NewPhoto(callback.Message.Chat.ID, tgbotapi.FileURL(chartURL))
+	photo.Caption = "🔥 *Текущие серии привычек*"
+	photo.ParseMode = "Markdown"
+
+	h.bot.Request(tgbotapi.NewDeleteMessage(callback.Message.Chat.ID, callback.Message.MessageID))
+	h.bot.Send(photo)
+
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("« Назад к статистике", "back_to_stats_text"),
+		),
+	)
+	msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "👆 График серий")
+	msg.ReplyMarkup = keyboard
+	h.bot.Send(msg)
+}
+
+func (h *Handlers) handleChartCalendarCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	user, _ := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
+	habits, _ := h.habitSvc.GetUserHabits(ctx, user.ID)
+
+	if len(habits) == 0 {
+		h.sendError(callback.Message.Chat.ID, "У тебя нет привычек")
+		return
+	}
+
+	keyboard := HabitSelectForChartKeyboard(habits)
+	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, "📅 Выбери привычку для календаря:", &keyboard)
+}
+
+func (h *Handlers) handleChartHabitCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	habitID, _ := strconv.ParseInt(strings.TrimPrefix(callback.Data, "chart_habit_"), 10, 64)
+
+	habit, err := h.habitSvc.GetHabit(ctx, habitID)
+	if err != nil {
+		h.sendError(callback.Message.Chat.ID, "Привычка не найдена")
+		return
+	}
+
+	// Получаем дни выполнения за 30 дней
+	completedDays, _ := h.repo.GetHabitCompletionDays(ctx, habitID, 30)
+
+	chartURL := GenerateHabitCalendar(habit.Name, completedDays)
+
+	// Отправляем картинку
+	photo := tgbotapi.NewPhoto(callback.Message.Chat.ID, tgbotapi.FileURL(chartURL))
+	photo.Caption = fmt.Sprintf("📅 *%s* — последние 30 дней\n\n🟢 — выполнено\n🔴 — пропущено", habit.Name)
+	photo.ParseMode = "Markdown"
+	h.bot.Request(tgbotapi.NewDeleteMessage(callback.Message.Chat.ID, callback.Message.MessageID))
+	h.bot.Send(photo)
+
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("« Назад к статистике", "back_to_stats_text"),
+		),
+	)
+	msg := tgbotapi.NewMessage(callback.Message.Chat.ID, "👆 Календарь привычки")
+	msg.ReplyMarkup = keyboard
+	h.bot.Send(msg)
+}
+
+func (h *Handlers) handleBackToStatsCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	user, _ := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
+	stats, _ := h.habitSvc.GetUserStats(ctx, user.ID)
+	overallStreak, _ := h.habitSvc.GetUserOverallStreak(ctx, user.ID)
+
+	var sb strings.Builder
+	sb.WriteString("📊 *Твоя статистика*\n\n")
+	sb.WriteString(fmt.Sprintf("🔥 *Общая серия:* %d дн.\n\n", overallStreak))
+
+	for _, s := range stats {
+		emoji := "🔥"
+		if s.CurrentStreak == 0 {
+			emoji = "💤"
+		}
+		sb.WriteString(fmt.Sprintf("*%s*\n", s.HabitName))
+		sb.WriteString(fmt.Sprintf("  %s Серия: %d дн. | 🏆 Лучшая: %d дн.\n", emoji, s.CurrentStreak, s.BestStreak))
+		sb.WriteString(fmt.Sprintf("  📈 Выполнено: %.0f%%\n\n", s.CompletionRate))
+	}
+
+	sb.WriteString("👇 *Выбери график:*")
+
+	keyboard := StatsKeyboard()
+	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, sb.String(), &keyboard)
 }

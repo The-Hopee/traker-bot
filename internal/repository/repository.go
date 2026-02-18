@@ -15,6 +15,12 @@ type UserExportData struct {
 	Stats        []*domain.HabitStats
 }
 
+type HabitStreak struct {
+	HabitID int64
+	Name    string
+	Streak  int
+}
+
 type Repository interface {
 	// Users
 	CreateUser(ctx context.Context, user *domain.User) error
@@ -122,6 +128,11 @@ type Repository interface {
 	MarkWeeklyPromoSent(ctx context.Context, userID int64) error
 
 	UpdateHabitReminder(ctx context.Context, habitID int64, reminderTime *string, reminderDays []int) error
+
+	// Charts
+	GetWeeklyCompletionStats(ctx context.Context, userID int64) (map[string]int, error)
+	GetHabitCompletionDays(ctx context.Context, habitID int64, days int) (map[string]bool, error)
+	GetHabitsStreaks(ctx context.Context, userID int64) ([]HabitStreak, error)
 
 	Close()
 }

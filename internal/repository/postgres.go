@@ -1026,3 +1026,157 @@ func (r *PostgresRepository) UpdateHabitReminder(ctx context.Context, habitID in
     `, reminderTime, reminderDays, habitID)
 	return err
 }
+
+// ===== CHARTS =====
+
+// GetWeeklyCompletionStats — количество выполненных привычек по дням за 7 дней
+func (r *PostgresRepository) GetWeeklyCompletionStats(ctx context.Context, userID int64) (map[string]int, error) {
+	rows, err := r.db.Query(ctx, `
+	  SELECT DATE(hc.completed_at) as date, COUNT(*) as count
+	  FROM habit_completions hc
+	  JOIN habits h ON hc.habit_id = h.id
+	  WHERE h.user_id = $1 
+		AND hc.completed_at >= CURRENT_DATE - INTERVAL '6 days'
+	  GROUP BY DATE(hc.completed_at)
+	  ORDER BY date
+	`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[string]int)
+	for rows.Next() {
+		var date time.Time
+		var count int
+		if err := rows.Scan(&date, &count); err != nil {
+			return nil, err
+		}
+		result[date.Format("2006-01-02")] = count
+	}
+	return result, nil
+}
+
+// GetHabitCompletionDays — дни выполнения конкретной привычки
+func (r *PostgresRepository) GetHabitCompletionDays(ctx context.Context, habitID int64, days int) (map[string]bool, error) {
+	rows, err := r.db.Query(ctx, `
+	  SELECT DATE(completed_at)
+	  FROM habit_completions
+	  WHERE habit_id = $1 
+		AND completed_at >= CURRENT_DATE - $2 * INTERVAL '1 day'
+	`, habitID, days)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[string]bool)
+	for rows.Next() {
+		var date time.Time
+		if err := rows.Scan(&date); err != nil {
+			return nil, err
+		}
+		result[date.Format("2006-01-02")] = true
+	}
+	return result, nil
+}
+
+// GetHabitsStreaks — серии всех привычек пользователя
+func (r *PostgresRepository) GetHabitsStreaks(ctx context.Context, userID int64) ([]HabitStreak, error) {
+	rows, err := r.db.Query(ctx, `
+	  SELECT h.id, h.name, COALESCE(
+		(SELECT COUNT(*)::int FROM (
+		  SELECT DATE(completed_at) as d
+		  FROM habit_completions
+		  WHERE habit_id = h.id
+			AND completed_at >= CURRENT_DATE - INTERVAL '365 days'
+		  ORDER BY d DESC
+		) dates
+		WHERE d >= CURRENT_DATE - (ROW_NUMBER() OVER (ORDER BY d DESC) - 1) * INTERVAL '1 day'
+		), 0
+	  ) as streak
+	  FROM habits h
+	  WHERE h.user_id = $1 AND h.is_active = true
+	  ORDER BY h.name
+	`, userID)
+	if err != nil {
+		// Упрощённый запрос если сложный не работает
+		return r.getHabitsStreaksSimple(ctx, userID)
+	}
+	defer rows.Close()
+
+	var result []HabitStreak
+	for rows.Next() {
+		var hs HabitStreak
+		if err := rows.Scan(&hs.HabitID, &hs.Name, &hs.Streak); err != nil {
+			return nil, err
+		}
+		result = append(result, hs)
+	}
+	return result, nil
+}
+
+// Упрощённая версия
+func (r *PostgresRepository) getHabitsStreaksSimple(ctx context.Context, userID int64) ([]HabitStreak, error) {
+	rows, err := r.db.Query(ctx, `
+	  SELECT h.id, h.name
+	  FROM habits h
+	  WHERE h.user_id = $1 AND h.is_active = true
+	  ORDER BY h.name
+	`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []HabitStreak
+	for rows.Next() {
+		var hs HabitStreak
+		if err := rows.Scan(&hs.HabitID, &hs.Name); err != nil {
+			return nil, err
+		}
+		// Получаем серию отдельно
+		hs.Streak = r.calculateStreak(ctx, hs.HabitID)
+		result = append(result, hs)
+	}
+	return result, nil
+}
+
+func (r *PostgresRepository) calculateStreak(ctx context.Context, habitID int64) int {
+	rows, err := r.db.Query(ctx, `
+	  SELECT DATE(completed_at) as d
+	  FROM habit_completions
+	  WHERE habit_id = $1
+	  ORDER BY d DESC
+	  LIMIT 365
+	`, habitID)
+	if err != nil {
+		return 0
+	}
+	defer rows.Close()
+
+	var dates []time.Time
+	for rows.Next() {
+		var d time.Time
+		rows.Scan(&d)
+		dates = append(dates, d)
+	}
+
+	if len(dates) == 0 {
+		return 0
+	}
+
+	streak := 0
+	today := time.Now().Truncate(24 * time.Hour)
+
+	for i, d := range dates {
+		expected := today.AddDate(0, 0, -i)
+		if d.Format("2006-01-02") == expected.Format("2006-01-02") {
+			streak++
+		} else {
+			break
+		}
+	}
+
+	return streak
+}

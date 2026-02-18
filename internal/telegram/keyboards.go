@@ -231,3 +231,35 @@ func CancelKeyboard() tgbotapi.InlineKeyboardMarkup {
 		),
 	)
 }
+
+// StatsKeyboard — клавиатура для статистики
+func StatsKeyboard() tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("📊 График за неделю", "chart_weekly"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔥 Серии привычек", "chart_streaks"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("📅 Календарь привычки", "chart_calendar"),
+		),
+	)
+}
+
+// HabitSelectForChartKeyboard — выбор привычки для календаря
+func HabitSelectForChartKeyboard(habits []*domain.Habit) tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+
+	for _, h := range habits {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(h.Name, fmt.Sprintf("chart_habit_%d", h.ID)),
+		))
+	}
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("« Назад", "back_to_stats"),
+	))
+
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
