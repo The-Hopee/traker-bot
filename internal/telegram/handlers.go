@@ -743,6 +743,7 @@ func (h *Handlers) handleCallback(ctx context.Context, callback *tgbotapi.Callba
 
 	case data == "my_referrals":
 		h.handleMyReferralsCallback(ctx, callback)
+
 	case data == "chart_weekly":
 		h.handleChartWeeklyCallback(ctx, callback)
 
@@ -757,6 +758,7 @@ func (h *Handlers) handleCallback(ctx context.Context, callback *tgbotapi.Callba
 
 	case data == "back_to_stats" || data == "back_to_stats_text":
 		h.handleBackToStatsCallback(ctx, callback)
+
 	case strings.HasPrefix(data, "close_ad_"):
 		h.bot.Send(tgbotapi.NewDeleteMessage(callback.Message.Chat.ID, callback.Message.MessageID))
 	}
@@ -1587,11 +1589,24 @@ func (h *Handlers) handleChartStreaksCallback(ctx context.Context, callback *tgb
 }
 
 func (h *Handlers) handleChartCalendarCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
-	user, _ := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
-	habits, _ := h.habitSvc.GetUserHabits(ctx, user.ID)
+	user, err := h.repo.GetUserByTelegramID(ctx, callback.From.ID)
+	if err != nil {
+		log.Printf("Chart calendar: ошибка получения юзера: %v", err)
+		h.sendError(callback.Message.Chat.ID, "Ошибка")
+		return
+	}
+
+	habits, err := h.habitSvc.GetUserHabits(ctx, user.ID)
+	if err != nil {
+		log.Printf("Chart calendar: ошибка получения привычек: %v", err)
+		h.sendError(callback.Message.Chat.ID, "Ошибка загрузки привычек")
+		return
+	}
+
+	log.Printf("Chart calendar: найдено %d привычек для user.ID=%d", len(habits), user.ID)
 
 	if len(habits) == 0 {
-		h.sendError(callback.Message.Chat.ID, "У тебя нет привычек")
+		h.answerCallback(callback.ID, "У тебя нет привычек")
 		return
 	}
 
@@ -1600,25 +1615,50 @@ func (h *Handlers) handleChartCalendarCallback(ctx context.Context, callback *tg
 }
 
 func (h *Handlers) handleChartHabitCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
-	habitID, _ := strconv.ParseInt(strings.TrimPrefix(callback.Data, "chart_habit_"), 10, 64)
+	habitIDStr := strings.TrimPrefix(callback.Data, "chart_habit_")
+	habitID, err := strconv.ParseInt(habitIDStr, 10, 64)
+	if err != nil {
+		log.Printf("Chart habit: ошибка парсинга habitID из '%s': %v", habitIDStr, err)
+		h.sendError(callback.Message.Chat.ID, "Ошибка")
+		return
+	}
+
+	log.Printf("Chart habit: запрос для habitID=%d", habitID)
 
 	habit, err := h.habitSvc.GetHabit(ctx, habitID)
 	if err != nil {
+		log.Printf("Chart habit: ошибка получения привычки %d: %v", habitID, err)
 		h.sendError(callback.Message.Chat.ID, "Привычка не найдена")
 		return
 	}
 
+	log.Printf("Chart habit: привычка найдена: %s", habit.Name)
+
 	// Получаем дни выполнения за 30 дней
-	completedDays, _ := h.repo.GetHabitCompletionDays(ctx, habitID, 30)
+	completedDays, err := h.repo.GetHabitCompletionDays(ctx, habitID, 30)
+	if err != nil {
+		log.Printf("Chart habit: ошибка GetHabitCompletionDays: %v", err)
+		completedDays = make(map[string]bool)
+	}
+
+	log.Printf("Chart habit: найдено %d дней выполнения", len(completedDays))
 
 	chartURL := GenerateHabitCalendar(habit.Name, completedDays)
+	log.Printf("Chart habit: URL длина=%d", len(chartURL))
+
+	// Удаляем старое сообщение
+	h.bot.Request(tgbotapi.NewDeleteMessage(callback.Message.Chat.ID, callback.Message.MessageID))
 
 	// Отправляем картинку
 	photo := tgbotapi.NewPhoto(callback.Message.Chat.ID, tgbotapi.FileURL(chartURL))
 	photo.Caption = fmt.Sprintf("📅 *%s* — последние 30 дней\n\n🟢 — выполнено\n🔴 — пропущено", habit.Name)
 	photo.ParseMode = "Markdown"
-	h.bot.Request(tgbotapi.NewDeleteMessage(callback.Message.Chat.ID, callback.Message.MessageID))
-	h.bot.Send(photo)
+
+	_, err = h.bot.Send(photo)
+	if err != nil {
+		log.Printf("Chart habit: ошибка отправки фото: %v", err)
+		h.sendMessage(callback.Message.Chat.ID, "❌ Не удалось загрузить график")
+	}
 
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
@@ -1653,4 +1693,10 @@ func (h *Handlers) handleBackToStatsCallback(ctx context.Context, callback *tgbo
 
 	keyboard := StatsKeyboard()
 	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, sb.String(), &keyboard)
+}
+
+// -------------------- HELPERS --------------------------
+
+func (h *Handlers) answerCallback(callbackID string, text string) {
+	h.bot.Send(tgbotapi.NewCallback(callbackID, text))
 }
