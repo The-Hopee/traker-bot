@@ -54,6 +54,37 @@ func (s *HabitService) CreateHabit(ctx context.Context, user *domain.User, name,
 	return habit, nil
 }
 
+func (s *HabitService) CreateHabitWithEmoji(ctx context.Context, user *domain.User, name, description string, frequency domain.Frequency, emoji string) (*domain.Habit, error) {
+	count, err := s.repo.CountUserHabits(ctx, user.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	limit := domain.FreeHabitsLimit
+	if user.HasActiveSubscription() {
+		limit = domain.PremiumHabitsLimit
+	}
+
+	if count >= limit {
+		return nil, ErrHabitLimitReached
+	}
+
+	habit := &domain.Habit{
+		UserID:      user.ID,
+		Name:        name,
+		Description: description,
+		Frequency:   frequency,
+		IsActive:    true,
+		Emoji:       emoji,
+	}
+
+	if err := s.repo.CreateHabit(ctx, habit); err != nil {
+		return nil, err
+	}
+
+	return habit, nil
+}
+
 func (s *HabitService) GetUserHabits(ctx context.Context, userID int64) ([]*domain.Habit, error) {
 	return s.repo.GetActiveHabits(ctx, userID)
 }

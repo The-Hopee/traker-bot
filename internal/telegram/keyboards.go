@@ -279,10 +279,34 @@ func EditHabitKeyboard(habitID int64) tgbotapi.InlineKeyboardMarkup {
 			tgbotapi.NewInlineKeyboardButtonData("✏️ Название", fmt.Sprintf("edit_name_%d", habitID)),
 		),
 		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🏷 Категория", fmt.Sprintf("edit_emoji_%d", habitID)),
+		),
+		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("📅 Периодичность", fmt.Sprintf("edit_freq_%d", habitID)),
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("« Назад", fmt.Sprintf("habit_%d", habitID)),
+		),
+	)
+}
+
+// EmojiKeyboard — выбор категории/эмодзи для привычки
+func EmojiKeyboard() tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🏃 Спорт", "emoji:🏃"),
+			tgbotapi.NewInlineKeyboardButtonData("📚 Учёба", "emoji:📚"),
+			tgbotapi.NewInlineKeyboardButtonData("💼 Работа", "emoji:💼"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🧘 Здоровье", "emoji:🧘"),
+			tgbotapi.NewInlineKeyboardButtonData("💰 Финансы", "emoji:💰"),
+			tgbotapi.NewInlineKeyboardButtonData("🎨 Хобби", "emoji:🎨"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🍎 Питание", "emoji:🍎"),
+			tgbotapi.NewInlineKeyboardButtonData("😴 Сон", "emoji:😴"),
+			tgbotapi.NewInlineKeyboardButtonData("🎯 Другое", "emoji:🎯"),
 		),
 	)
 }

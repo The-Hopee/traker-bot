@@ -138,5 +138,8 @@ type Repository interface {
 	UpdateHabitName(ctx context.Context, habitID int64, name string) error
 	UpdateHabitFrequency(ctx context.Context, habitID int64, frequency domain.Frequency) error
 
+	// Emoji
+	UpdateHabitEmoji(ctx context.Context, habitID int64, emoji string) error
+
 	Close()
 }

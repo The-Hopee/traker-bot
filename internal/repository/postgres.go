@@ -222,25 +222,24 @@ func (r *PostgresRepository) GetUserIDByTelegramID(ctx context.Context, telegram
 
 // ==================== HABITS ====================
 func (r *PostgresRepository) CreateHabit(ctx context.Context, habit *domain.Habit) error {
-	query := `
-	  INSERT INTO habits (user_id, name, description, frequency, reminder_time, is_active, created_at, updated_at)
-	  VALUES ($1, $2, $3, $4, $5, $6, $7, $7) RETURNING id`
-	return r.db.QueryRow(ctx, query,
-		habit.UserID, habit.Name, habit.Description, habit.Frequency,
-		habit.ReminderTime, habit.IsActive, time.Now(),
-	).Scan(&habit.ID)
+	return r.db.QueryRow(ctx, `
+	  INSERT INTO habits (user_id, name, description, frequency, emoji, reminder_time, reminder_days)
+	  VALUES ($1, $2, $3, $4, $5, $6, $7)
+	  RETURNING id, created_at
+	`, habit.UserID, habit.Name, habit.Description, habit.Frequency, habit.Emoji, habit.ReminderTime, habit.ReminderDays).
+		Scan(&habit.ID, &habit.CreatedAt)
 }
 
 func (r *PostgresRepository) GetHabitByID(ctx context.Context, id int64) (*domain.Habit, error) {
 	query := `
-	  SELECT id, user_id, name, description, frequency, reminder_time, is_active, created_at, updated_at
+	  SELECT id, user_id, name, description, frequency, emoji, reminder_time, is_active, created_at, updated_at
 	  FROM habits WHERE id = $1`
 
 	habit := &domain.Habit{}
 	err := r.db.QueryRow(ctx, query, id).Scan(
 		&habit.ID, &habit.UserID, &habit.Name, &habit.Description,
-		&habit.Frequency, &habit.ReminderTime, &habit.IsActive,
-		&habit.CreatedAt, &habit.UpdatedAt,
+		&habit.Frequency, &habit.Emoji, &habit.ReminderTime,
+		&habit.IsActive, &habit.CreatedAt, &habit.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -250,7 +249,7 @@ func (r *PostgresRepository) GetHabitByID(ctx context.Context, id int64) (*domai
 
 func (r *PostgresRepository) GetActiveHabits(ctx context.Context, userID int64) ([]*domain.Habit, error) {
 	query := `
-	  SELECT id, user_id, name, description, frequency, reminder_time, is_active, created_at, updated_at
+	  SELECT id, user_id, name, description, frequency, emoji, reminder_time, is_active, created_at, updated_at
 	  FROM habits WHERE user_id = $1 AND is_active = true ORDER BY created_at DESC`
 
 	rows, err := r.db.Query(ctx, query, userID)
@@ -262,7 +261,7 @@ func (r *PostgresRepository) GetActiveHabits(ctx context.Context, userID int64) 
 	var habits []*domain.Habit
 	for rows.Next() {
 		h := &domain.Habit{}
-		if err := rows.Scan(&h.ID, &h.UserID, &h.Name, &h.Description, &h.Frequency, &h.ReminderTime, &h.IsActive, &h.CreatedAt, &h.UpdatedAt); err != nil {
+		if err := rows.Scan(&h.ID, &h.UserID, &h.Name, &h.Description, &h.Frequency, &h.Emoji, &h.ReminderTime, &h.IsActive, &h.CreatedAt, &h.UpdatedAt); err != nil {
 			return nil, err
 		}
 		habits = append(habits, h)
@@ -271,7 +270,7 @@ func (r *PostgresRepository) GetActiveHabits(ctx context.Context, userID int64) 
 }
 
 func (r *PostgresRepository) UpdateHabit(ctx context.Context, habit *domain.Habit) error {
-	query := `UPDATE habits SET name=$2, description=$3, frequency=$4, reminder_time=$5, is_active=$6, updated_at=$7 WHERE id=$1`
+	query := `UPDATE habits SET name=$2, description=$3, frequency=$4, emoji=$5, reminder_time=$6, is_active=$7, updated_at=$8 WHERE id=$1`
 	_, err := r.db.Exec(ctx, query, habit.ID, habit.Name, habit.Description, habit.Frequency, habit.ReminderTime, habit.IsActive, time.Now())
 	return err
 }
@@ -1157,5 +1156,11 @@ func (r *PostgresRepository) UpdateHabitName(ctx context.Context, habitID int64,
 
 func (r *PostgresRepository) UpdateHabitFrequency(ctx context.Context, habitID int64, frequency domain.Frequency) error {
 	_, err := r.db.Exec(ctx, `UPDATE habits SET frequency = $1 WHERE id = $2`, frequency, habitID)
+	return err
+}
+
+// Emoji
+func (r *PostgresRepository) UpdateHabitEmoji(ctx context.Context, habitID int64, emoji string) error {
+	_, err := r.db.Exec(ctx, `UPDATE habits SET emoji = $1 WHERE id = $2`, emoji, habitID)
 	return err
 }

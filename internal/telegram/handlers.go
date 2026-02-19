@@ -26,6 +26,8 @@ const (
 	StateWaitingReminderDays = "waiting_reminder_days"
 	StateWaitingCustomDays   = "waiting_custom_days"
 	StateEditingHabitName    = "editing_habit_name"
+	StateWaitingEmoji        = "waiting_emoji"
+	StateEditingEmoji        = "editing_emoji"
 )
 
 type UserState struct {
@@ -35,6 +37,7 @@ type UserState struct {
 	ReminderTime string
 	SelectedDays map[int]bool
 	EditHabitID  int64
+	Emoji        string
 }
 
 type Handlers struct {
@@ -273,7 +276,30 @@ func (h *Handlers) handleHabits(ctx context.Context, msg *tgbotapi.Message) {
 	if len(habits) == 0 {
 		text += "У тебя пока нет привычек. Создай первую!"
 	} else {
-		text += "Выбери привычку для подробностей:"
+		// Группируем по эмодзи
+		groups := make(map[string][]*domain.Habit)
+		for _, habit := range habits {
+			emoji := habit.Emoji
+			if emoji == "" {
+				emoji = "🎯"
+			}
+			groups[emoji] = append(groups[emoji], habit)
+		}
+
+		// Выводим по группам
+		for emoji, habitList := range groups {
+			text += fmt.Sprintf("*%s Категория*\n", emoji)
+			for _, habit := range habitList {
+				status := "⬜️"
+				if completedToday[habit.ID] {
+					status = "✅"
+				}
+				text += fmt.Sprintf("  %s %s\n", status, habit.Name)
+			}
+			text += "\n"
+		}
+
+		text += "👇 Выбери привычку:"
 	}
 
 	reply := tgbotapi.NewMessage(msg.Chat.ID, text)
@@ -328,12 +354,12 @@ func (h *Handlers) handleUserState(ctx context.Context, msg *tgbotapi.Message, s
 			return
 		}
 		state.HabitName = msg.Text
-		state.State = "awaiting_frequency"
+		state.State = StateWaitingEmoji
 
-		text := fmt.Sprintf("📝 Привычка: *%s*\n\nВыбери периодичность:", state.HabitName)
+		text := fmt.Sprintf("📝 Привычка: *%s*\n\nВыбери категорию:", state.HabitName)
 		reply := tgbotapi.NewMessage(msg.Chat.ID, text)
 		reply.ParseMode = "Markdown"
-		reply.ReplyMarkup = FrequencyKeyboard()
+		reply.ReplyMarkup = EmojiKeyboard()
 		h.bot.Send(reply)
 
 	case StateWaitingCustomTime:
@@ -790,6 +816,12 @@ func (h *Handlers) handleCallback(ctx context.Context, callback *tgbotapi.Callba
 
 	case strings.HasPrefix(data, "edit_freq_"):
 		h.handleEditFreqCallback(ctx, callback)
+
+	case strings.HasPrefix(data, "emoji:"):
+		h.handleEmojiCallback(ctx, callback)
+
+	case strings.HasPrefix(data, "edit_emoji_"):
+		h.handleEditEmojiCallback(ctx, callback)
 
 	case strings.HasPrefix(data, "close_ad_"):
 		h.bot.Send(tgbotapi.NewDeleteMessage(callback.Message.Chat.ID, callback.Message.MessageID))
@@ -1480,6 +1512,12 @@ func (h *Handlers) createHabitFinal(ctx context.Context, chatID int64, telegramI
 
 	freq := domain.Frequency(state.Frequency)
 
+	// Эмодзи по умолчанию
+	emoji := state.Emoji
+	if emoji == "" {
+		emoji = "🎯"
+	}
+
 	// Подготовка напоминания
 	var reminderTime *string
 	var reminderDays []int
@@ -1494,7 +1532,7 @@ func (h *Handlers) createHabitFinal(ctx context.Context, chatID int64, telegramI
 		sort.Ints(reminderDays)
 	}
 
-	habit, err := h.habitSvc.CreateHabit(ctx, user, state.HabitName, "", freq)
+	habit, err := h.habitSvc.CreateHabitWithEmoji(ctx, user, state.HabitName, "", freq, emoji)
 	if err != nil {
 		h.sendError(chatID, "Ошибка создания привычки")
 		return
@@ -1505,7 +1543,7 @@ func (h *Handlers) createHabitFinal(ctx context.Context, chatID int64, telegramI
 		h.repo.UpdateHabitReminder(ctx, habit.ID, reminderTime, reminderDays)
 	}
 
-	text := fmt.Sprintf("✅ Привычка *%s* создана!", habit.Name)
+	text := fmt.Sprintf("✅ Привычка создана!\n\n%s *%s*", emoji, habit.Name)
 	if reminderTime != nil {
 		daysText := formatDays(reminderDays)
 		text += fmt.Sprintf("\n⏰ Напоминание: *%s* (%s)", *reminderTime, daysText)
@@ -1758,6 +1796,44 @@ func (h *Handlers) handleBackToStatsCallback(ctx context.Context, callback *tgbo
 
 // -------------------- HELPERS --------------------------
 
+func (h *Handlers) handleEmojiCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	state, ok := h.userStates[callback.From.ID]
+	if !ok {
+		return
+	}
+
+	emoji := strings.TrimPrefix(callback.Data, "emoji:")
+
+	// Если редактируем существующую привычку
+	if state.State == StateEditingEmoji {
+		err := h.repo.UpdateHabitEmoji(ctx, state.EditHabitID, emoji)
+		if err != nil {
+			h.sendError(callback.Message.Chat.ID, "Ошибка сохранения")
+			delete(h.userStates, callback.From.ID)
+			return
+		}
+
+		delete(h.userStates, callback.From.ID)
+
+		text := fmt.Sprintf("✅ Категория изменена: %s", emoji)
+		keyboard := BackKeyboard(fmt.Sprintf("habit_%d", state.EditHabitID))
+		h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, text, &keyboard)
+		return
+	}
+
+	// Если создаём новую привычку
+	if state.State != StateWaitingEmoji {
+		return
+	}
+
+	state.Emoji = emoji
+	state.State = "awaiting_frequency"
+
+	text := fmt.Sprintf("%s *%s*\n\nВыбери периодичность:", emoji, state.HabitName)
+	keyboard := FrequencyKeyboard()
+	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, text, &keyboard)
+}
+
 func (h *Handlers) answerCallback(callbackID string, text string) {
 	h.bot.Send(tgbotapi.NewCallback(callbackID, text))
 }
@@ -1799,4 +1875,16 @@ func (h *Handlers) handleEditFreqCallback(ctx context.Context, callback *tgbotap
 
 	keyboard := FrequencyKeyboard()
 	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, "📅 Выбери новую периодичность:", &keyboard)
+}
+
+func (h *Handlers) handleEditEmojiCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	habitID, _ := strconv.ParseInt(strings.TrimPrefix(callback.Data, "edit_emoji_"), 10, 64)
+
+	h.userStates[callback.From.ID] = &UserState{
+		State:       StateEditingEmoji,
+		EditHabitID: habitID,
+	}
+
+	keyboard := EmojiKeyboard()
+	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, "🏷 Выбери новую категорию:", &keyboard)
 }

@@ -55,6 +55,7 @@ type Habit struct {
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 	ReminderDays []int // [1,2,3,4,5] = пн-пт, [1,2,3,4,5,6,7] = все дни
+	Emoji        string
 }
 
 type Frequency string
