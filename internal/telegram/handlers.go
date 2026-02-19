@@ -25,6 +25,7 @@ const (
 	StateWaitingCustomTime   = "waiting_custom_time"
 	StateWaitingReminderDays = "waiting_reminder_days"
 	StateWaitingCustomDays   = "waiting_custom_days"
+	StateEditingHabitName    = "editing_habit_name"
 )
 
 type UserState struct {
@@ -33,6 +34,7 @@ type UserState struct {
 	Frequency    string
 	ReminderTime string
 	SelectedDays map[int]bool
+	EditHabitID  int64
 }
 
 type Handlers struct {
@@ -345,6 +347,27 @@ func (h *Handlers) handleUserState(ctx context.Context, msg *tgbotapi.Message, s
 
 		keyboard := ReminderDaysKeyboard()
 		reply := tgbotapi.NewMessage(msg.Chat.ID, "📅 В какие дни напоминать?")
+		reply.ReplyMarkup = keyboard
+		h.bot.Send(reply)
+	case StateEditingHabitName:
+		if len(msg.Text) > 100 {
+			h.sendError(msg.Chat.ID, "Название слишком длинное (макс. 100 символов)")
+			return
+		}
+
+		err := h.repo.UpdateHabitName(ctx, state.EditHabitID, msg.Text)
+		if err != nil {
+			h.sendError(msg.Chat.ID, "Ошибка сохранения")
+			delete(h.userStates, msg.From.ID)
+			return
+		}
+
+		delete(h.userStates, msg.From.ID)
+
+		text := fmt.Sprintf("✅ Название изменено на *%s*", msg.Text)
+		keyboard := BackKeyboard(fmt.Sprintf("habit_%d", state.EditHabitID))
+		reply := tgbotapi.NewMessage(msg.Chat.ID, text)
+		reply.ParseMode = "Markdown"
 		reply.ReplyMarkup = keyboard
 		h.bot.Send(reply)
 	}
@@ -759,6 +782,15 @@ func (h *Handlers) handleCallback(ctx context.Context, callback *tgbotapi.Callba
 	case data == "back_to_stats" || data == "back_to_stats_text":
 		h.handleBackToStatsCallback(ctx, callback)
 
+	case strings.HasPrefix(data, "edit_habit_"):
+		h.handleEditHabitCallback(ctx, callback)
+
+	case strings.HasPrefix(data, "edit_name_"):
+		h.handleEditNameCallback(ctx, callback)
+
+	case strings.HasPrefix(data, "edit_freq_"):
+		h.handleEditFreqCallback(ctx, callback)
+
 	case strings.HasPrefix(data, "close_ad_"):
 		h.bot.Send(tgbotapi.NewDeleteMessage(callback.Message.Chat.ID, callback.Message.MessageID))
 	}
@@ -766,11 +798,40 @@ func (h *Handlers) handleCallback(ctx context.Context, callback *tgbotapi.Callba
 
 func (h *Handlers) handleFrequencyCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
 	state, ok := h.userStates[callback.From.ID]
-	if !ok || state.State != "awaiting_frequency" {
+	if !ok {
 		return
 	}
 
 	freq := strings.TrimPrefix(callback.Data, "freq_")
+
+	// Если редактируем существующую привычку
+	if state.State == "editing_frequency" {
+		err := h.repo.UpdateHabitFrequency(ctx, state.EditHabitID, domain.Frequency(freq))
+		if err != nil {
+			h.sendError(callback.Message.Chat.ID, "Ошибка сохранения")
+			delete(h.userStates, callback.From.ID)
+			return
+		}
+
+		delete(h.userStates, callback.From.ID)
+
+		freqText := map[string]string{
+			"daily":   "Ежедневно",
+			"weekly":  "Еженедельно",
+			"monthly": "Ежемесячно",
+		}
+
+		text := fmt.Sprintf("✅ Периодичность изменена: *%s*", freqText[freq])
+		keyboard := BackKeyboard(fmt.Sprintf("habit_%d", state.EditHabitID))
+		h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, text, &keyboard)
+		return
+	}
+
+	// Если создаём новую привычку
+	if state.State != "awaiting_frequency" {
+		return
+	}
+
 	state.Frequency = freq
 	state.State = StateWaitingReminderMode
 
@@ -1699,4 +1760,43 @@ func (h *Handlers) handleBackToStatsCallback(ctx context.Context, callback *tgbo
 
 func (h *Handlers) answerCallback(callbackID string, text string) {
 	h.bot.Send(tgbotapi.NewCallback(callbackID, text))
+}
+
+// ==================== EDIT HABIT ====================
+
+func (h *Handlers) handleEditHabitCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	habitID, _ := strconv.ParseInt(strings.TrimPrefix(callback.Data, "edit_habit_"), 10, 64)
+
+	habit, err := h.habitSvc.GetHabit(ctx, habitID)
+	if err != nil {
+		h.sendError(callback.Message.Chat.ID, "Привычка не найдена")
+		return
+	}
+
+	text := fmt.Sprintf("✏️ *Редактирование*\n\n📝 *%s*\n\nЧто изменить?", habit.Name)
+	keyboard := EditHabitKeyboard(habitID)
+	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, text, &keyboard)
+}
+
+func (h *Handlers) handleEditNameCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	habitID, _ := strconv.ParseInt(strings.TrimPrefix(callback.Data, "edit_name_"), 10, 64)
+
+	h.userStates[callback.From.ID] = &UserState{
+		State:       StateEditingHabitName,
+		EditHabitID: habitID,
+	}
+
+	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, "✏️ Введи новое название привычки:", nil)
+}
+
+func (h *Handlers) handleEditFreqCallback(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	habitID, _ := strconv.ParseInt(strings.TrimPrefix(callback.Data, "edit_freq_"), 10, 64)
+
+	h.userStates[callback.From.ID] = &UserState{
+		State:       "editing_frequency",
+		EditHabitID: habitID,
+	}
+
+	keyboard := FrequencyKeyboard()
+	h.editMessage(callback.Message.Chat.ID, callback.Message.MessageID, "📅 Выбери новую периодичность:", &keyboard)
 }

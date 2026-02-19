@@ -1148,3 +1148,14 @@ func (r *PostgresRepository) calculateHabitStreak(ctx context.Context, habitID i
 
 	return streak
 }
+
+// Edit
+func (r *PostgresRepository) UpdateHabitName(ctx context.Context, habitID int64, name string) error {
+	_, err := r.db.Exec(ctx, `UPDATE habits SET name = $1 WHERE id = $2`, name, habitID)
+	return err
+}
+
+func (r *PostgresRepository) UpdateHabitFrequency(ctx context.Context, habitID int64, frequency domain.Frequency) error {
+	_, err := r.db.Exec(ctx, `UPDATE habits SET frequency = $1 WHERE id = $2`, frequency, habitID)
+	return err
+}

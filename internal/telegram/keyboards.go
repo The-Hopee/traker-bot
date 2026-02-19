@@ -76,23 +76,33 @@ func TodayChecklistKeyboard(habits []*domain.Habit, completedToday map[int64]boo
 func HabitDetailKeyboard(habitID int64, isPremium bool) tgbotapi.InlineKeyboardMarkup {
 	var rows [][]tgbotapi.InlineKeyboardButton
 
+	// Кнопка статистики
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("✅ Выполнено", fmt.Sprintf("complete_%d", habitID)),
 		tgbotapi.NewInlineKeyboardButtonData("📊 Статистика", fmt.Sprintf("stats_%d", habitID)),
 	))
 
+	// Кнопка редактирования
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("✏️ Редактировать", fmt.Sprintf("edit_habit_%d", habitID)),
+	))
+
+	// Напоминание
 	if isPremium {
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("⏰ Напоминание", fmt.Sprintf("reminder_%d", habitID)),
-			tgbotapi.NewInlineKeyboardButtonData("🗑 Удалить", fmt.Sprintf("delete_%d", habitID)),
 		))
 	} else {
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🔒 Напоминание", "need_premium_reminder"),
-			tgbotapi.NewInlineKeyboardButtonData("🗑 Удалить", fmt.Sprintf("delete_%d", habitID)),
+			tgbotapi.NewInlineKeyboardButtonData("⏰ Напоминание 🔒", "need_premium_reminder"),
 		))
 	}
 
+	// Удаление
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🗑 Удалить", fmt.Sprintf("delete_%d", habitID)),
+	))
+
+	// Назад
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData("« Назад", "back_to_habits"),
 	))
@@ -233,6 +243,7 @@ func CancelKeyboard() tgbotapi.InlineKeyboardMarkup {
 }
 
 // StatsKeyboard — клавиатура для статистики
+// StatsKeyboard — клавиатура для статистики
 func StatsKeyboard() tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
@@ -240,9 +251,6 @@ func StatsKeyboard() tgbotapi.InlineKeyboardMarkup {
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🔥 Серии привычек", "chart_streaks"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📅 Календарь привычки", "chart_calendar"),
 		),
 	)
 }
@@ -262,4 +270,19 @@ func HabitSelectForChartKeyboard(habits []*domain.Habit) tgbotapi.InlineKeyboard
 	))
 
 	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// EditHabitKeyboard — что редактировать
+func EditHabitKeyboard(habitID int64) tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("✏️ Название", fmt.Sprintf("edit_name_%d", habitID)),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("📅 Периодичность", fmt.Sprintf("edit_freq_%d", habitID)),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("« Назад", fmt.Sprintf("habit_%d", habitID)),
+		),
+	)
 }

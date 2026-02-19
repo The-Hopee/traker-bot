@@ -134,5 +134,9 @@ type Repository interface {
 	GetHabitCompletionDays(ctx context.Context, habitID int64, days int) (map[string]bool, error)
 	GetHabitsStreaks(ctx context.Context, userID int64) ([]HabitStreak, error)
 
+	// Edit
+	UpdateHabitName(ctx context.Context, habitID int64, name string) error
+	UpdateHabitFrequency(ctx context.Context, habitID int64, frequency domain.Frequency) error
+
 	Close()
 }
