@@ -273,21 +273,37 @@ func HabitSelectForChartKeyboard(habits []*domain.Habit) tgbotapi.InlineKeyboard
 }
 
 // EditHabitKeyboard — что редактировать
-func EditHabitKeyboard(habitID int64) tgbotapi.InlineKeyboardMarkup {
-	return tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("✏️ Название", fmt.Sprintf("edit_name_%d", habitID)),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🏷 Категория", fmt.Sprintf("edit_emoji_%d", habitID)),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📅 Периодичность", fmt.Sprintf("edit_freq_%d", habitID)),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("« Назад", fmt.Sprintf("habit_%d", habitID)),
-		),
-	)
+func EditHabitKeyboard(habitID int64, isPremium bool) tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("✏️ Название", fmt.Sprintf("edit_name_%d", habitID)),
+	))
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🏷 Категория", fmt.Sprintf("edit_emoji_%d", habitID)),
+	))
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("📅 Периодичность", fmt.Sprintf("edit_freq_%d", habitID)),
+	))
+
+	// Напоминание только для Premium
+	if isPremium {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("⏰ Напоминание", fmt.Sprintf("edit_reminder_%d", habitID)),
+		))
+	} else {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("⏰ Напоминание 🔒", "need_premium_reminder"),
+		))
+	}
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("« Назад", fmt.Sprintf("habit_%d", habitID)),
+	))
+
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
 // EmojiKeyboard — выбор категории/эмодзи для привычки
@@ -309,4 +325,54 @@ func EmojiKeyboard() tgbotapi.InlineKeyboardMarkup {
 			tgbotapi.NewInlineKeyboardButtonData("🎯 Другое", "emoji:🎯"),
 		),
 	)
+}
+
+// HabitsViewKeyboard — выбор режима просмотра
+func HabitsViewKeyboard() tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("📋 Все привычки", "view_all_habits"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🏃 Спорт", "view_emoji_🏃"),
+			tgbotapi.NewInlineKeyboardButtonData("📚 Учёба", "view_emoji_📚"),
+			tgbotapi.NewInlineKeyboardButtonData("💼 Работа", "view_emoji_💼"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🧘 Здоровье", "view_emoji_🧘"),
+			tgbotapi.NewInlineKeyboardButtonData("💰 Финансы", "view_emoji_💰"),
+			tgbotapi.NewInlineKeyboardButtonData("🎨 Хобби", "view_emoji_🎨"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🍎 Питание", "view_emoji_🍎"),
+			tgbotapi.NewInlineKeyboardButtonData("😴 Сон", "view_emoji_😴"),
+			tgbotapi.NewInlineKeyboardButtonData("🎯 Другое", "view_emoji_🎯"),
+		),
+	)
+}
+
+// HabitsListKeyboardWithBack — список привычек с кнопкой назад
+func HabitsListKeyboardWithBack(habits []*domain.Habit, completedToday map[int64]bool) tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+
+	for _, h := range habits {
+		status := "⬜️"
+		if completedToday[h.ID] {
+			status = "✅"
+		}
+		emoji := h.Emoji
+		if emoji == "" {
+			emoji = "🎯"
+		}
+		text := fmt.Sprintf("%s %s %s", status, emoji, h.Name)
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(text, fmt.Sprintf("habit_%d", h.ID)),
+		))
+	}
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("« К категориям", "back_to_categories"),
+	))
+
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
