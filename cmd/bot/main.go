@@ -53,9 +53,6 @@ func main() {
 		}
 	}()
 
-	// Запускаем PromoService в горутине
-	go promoSvc.Start(ctx)
-
 	if err := bot.Start(ctx); err != nil {
 		log.Fatalf("Bot error: %v", err)
 	}
