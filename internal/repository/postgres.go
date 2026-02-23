@@ -955,67 +955,6 @@ func (r *PostgresRepository) IncrementPromocodeUsage(ctx context.Context, promoc
 	return tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) GetUsersForFirstPromo(ctx context.Context) ([]int64, error) {
-	rows, err := r.db.Query(ctx, `
-        SELECT u.telegram_id 
-        FROM users u
-        LEFT JOIN user_promo_status ups ON u.telegram_id = ups.user_id
-        WHERE u.created_at <= NOW() - INTERVAL '1 day'
-          AND (ups.first_promo_sent IS NULL OR ups.first_promo_sent = false)
-    `)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var ids []int64
-	for rows.Next() {
-		var id int64
-		rows.Scan(&id)
-		ids = append(ids, id)
-	}
-	return ids, nil
-}
-
-func (r *PostgresRepository) MarkFirstPromoSent(ctx context.Context, userID int64) error {
-	_, err := r.db.Exec(ctx, `
-        INSERT INTO user_promo_status (user_id, first_promo_sent)
-        VALUES ($1, true)
-        ON CONFLICT (user_id) DO UPDATE SET first_promo_sent = true
-    `, userID)
-	return err
-}
-
-func (r *PostgresRepository) GetUsersForWeeklyPromo(ctx context.Context) ([]int64, error) {
-	rows, err := r.db.Query(ctx, `
-        SELECT u.telegram_id 
-        FROM users u
-        LEFT JOIN user_promo_status ups ON u.telegram_id = ups.user_id
-        WHERE ups.first_promo_sent = true
-          AND (ups.last_weekly_promo IS NULL OR ups.last_weekly_promo < NOW() - INTERVAL '7 days')
-    `)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var ids []int64
-	for rows.Next() {
-		var id int64
-		rows.Scan(&id)
-		ids = append(ids, id)
-	}
-	return ids, nil
-}
-
-func (r *PostgresRepository) MarkWeeklyPromoSent(ctx context.Context, userID int64) error {
-	_, err := r.db.Exec(ctx, `
-        INSERT INTO user_promo_status (user_id, last_weekly_promo)
-        VALUES ($1, NOW())
-        ON CONFLICT (user_id) DO UPDATE SET last_weekly_promo = NOW()
-    `, userID)
-	return err
-}
 
 func (r *PostgresRepository) UpdateHabitReminder(ctx context.Context, habitID int64, reminderTime *string, reminderDays []int) error {
 	_, err := r.db.Exec(ctx, `

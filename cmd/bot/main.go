@@ -36,9 +36,6 @@ func main() {
 	tinkoffSvc := service.NewTinkoffService(repo, cfg.TinkoffTerminalKey, cfg.TinkoffPassword, cfg.TinkoffTestMode)
 	srv := server.NewServer(repo, tinkoffSvc, bot.GetHandlers(), cfg.Port)
 
-	// Создаём PromoService
-	promoSvc := service.NewPromoService(bot.GetBotAPI(), repo)
-
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 

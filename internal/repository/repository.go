@@ -121,12 +121,6 @@ type Repository interface {
 	ClearUserActivePromocode(ctx context.Context, userID int64) error
 	IncrementPromocodeUsage(ctx context.Context, promocodeID int64, userID int64) error
 
-	// Promo
-	GetUsersForFirstPromo(ctx context.Context) ([]int64, error)
-	MarkFirstPromoSent(ctx context.Context, userID int64) error
-	GetUsersForWeeklyPromo(ctx context.Context) ([]int64, error)
-	MarkWeeklyPromoSent(ctx context.Context, userID int64) error
-
 	UpdateHabitReminder(ctx context.Context, habitID int64, reminderTime *string, reminderDays []int) error
 
 	// Charts
