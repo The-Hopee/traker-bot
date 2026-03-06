@@ -353,9 +353,9 @@ const (
 	FreeHistoryDays    = 7
 	PremiumHistoryDays = 365
 
-	ReferralStage1Bonus    = 2
-	ReferralStage2Bonus    = 3
-	ReferralUnlockStreak   = 7
+	ReferralStage1Bonus    = 7
+	ReferralStage2Bonus    = 7
+	ReferralUnlockStreak   = 3
 	ReferralStage2Streak   = 7
 	ReferralBonusLimit     = 5
 	ReferralDiscountPerRef = 25
